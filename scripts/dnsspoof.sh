@@ -7,7 +7,7 @@
 #   dnsspoof.sh --off
 #   dnsspoof.sh --add example.com 10.0.0.5
 #   dnsspoof.sh --del example.com
-#   dnsspoof.sh --clear
+#   dnsspoof.sh --clear [-y]
 #   dnsspoof.sh                interactive mode
 
 set -u
@@ -15,6 +15,20 @@ TOOL_NAME="dnsspoof.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review, same class as loot.sh/
+# ssidpool.sh/autossh.sh): this file never defined a -y/--yes flag despite
+# --clear being gated behind confirm() - could never be scripted. Filtered
+# OUT of "$@" entirely (not just detected) so it can never accidentally
+# land as a positional HOST/IP argument to --add/--del.
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
 
 # BUG FOUND AND FIXED (same class as dns.sh's own fix): every CLI branch
 # ran its DNSSPOOF_* command and then printed a success message

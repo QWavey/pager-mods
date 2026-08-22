@@ -11,7 +11,7 @@
 # Usage:
 #   autossh.sh --enable
 #   autossh.sh --disable
-#   autossh.sh --clear
+#   autossh.sh --clear [-y]
 #   autossh.sh --setup HOST PORT USER REMOTEPORT LOCALPORT
 #   autossh.sh --add-port local|remote LOCALPORT HOST REMOTEPORT
 #   autossh.sh --known-host HOSTNAME KEYTYPE KEYDATA
@@ -23,6 +23,20 @@ TOOL_NAME="autossh.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review, same class as loot.sh/
+# ssidpool.sh): this file never defined a -y/--yes flag despite --clear
+# being gated behind confirm() - could never be scripted. Filtered OUT of
+# "$@" entirely (not just detected) so it can never accidentally land as a
+# positional HOST/PORT/... argument to --setup/--add-port/--known-host.
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
 
 # BUG FOUND AND FIXED (found via code review - the most complete instance
 # of the "silent on failure" class already fixed throughout this

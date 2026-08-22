@@ -3,7 +3,7 @@
 # hopping. Wraps PINEAPPLE_RECON_NEW / PINEAPPLE_HOPPING_START/STOP.
 #
 # Usage:
-#   reconsession.sh --new [NAME]
+#   reconsession.sh --new [NAME] [-y]
 #   reconsession.sh --pause
 #   reconsession.sh --resume
 #   reconsession.sh                interactive mode
@@ -13,6 +13,23 @@ TOOL_NAME="reconsession.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review): --new below already checks
+# $ASSUME_YES to decide whether to skip its confirm() gate (added earlier
+# this session), but this file never actually parsed a -y/--yes flag from
+# anywhere - ASSUME_YES could only ever be unset, so `reconsession.sh --new`
+# was made permanently non-scriptable by that earlier fix, the exact
+# regression class just found and fixed in loot.sh/ssidpool.sh/autossh.sh/
+# dnsspoof.sh. Filtered OUT of "$@" (not just detected) so it can't
+# accidentally land as the positional session NAME for --new.
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
 
 # BUG FOUND AND FIXED (found via code review, same class already fixed in
 # dns.sh/dnsspoof.sh/gps.sh/mgmt.sh/openap.sh/pcap.sh): every branch here
