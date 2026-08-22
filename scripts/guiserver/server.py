@@ -78,6 +78,32 @@ def cfg_get(key):
         return ""
 
 
+# BUG FOUND AND FIXED: run_script()'s background branch used to fire
+# subprocess.Popen(...) and immediately discard the object - once that
+# child exits, nothing ever reaps it (no .wait()/.poll() call anywhere),
+# leaving a zombie process entry behind. Over a long-running Control Panel
+# session with several background attacks/captures launched over time,
+# these accumulate. Tried the obvious fix first (signal.signal(SIGCHLD,
+# SIG_IGN) at startup) and caught it before shipping: Python's own
+# subprocess docs warn that overriding SIGCHLD's disposition can break
+# subprocess.run()/Popen.wait()'s own internal waitpid() bookkeeping for
+# EVERY child, including the far-more-common foreground path used by
+# almost every other button in this Control Panel - a fix for a minor
+# resource leak that risked breaking the main functionality instead.
+# Tracking only OUR OWN background Popen objects and reaping them with
+# .poll() (a plain non-blocking waitpid(WNOHANG) for that specific PID)
+# avoids the SIGCHLD-wide side effect entirely.
+_background_procs = []
+
+
+def _reap_background_procs():
+    still_running = []
+    for p in _background_procs:
+        if p.poll() is None:
+            still_running.append(p)
+    _background_procs[:] = still_running
+
+
 def run_script(name, args, timeout=60, background=False):
     if name not in ALLOWED_SCRIPTS:
         return {"rc": 1, "stdout": "", "stderr": f"'{name}' is not an allowed script"}
@@ -86,7 +112,9 @@ def run_script(name, args, timeout=60, background=False):
         return {"rc": 1, "stdout": "", "stderr": f"{path} not found"}
     cmd = ["bash", path] + list(args)
     if background:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _reap_background_procs()
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _background_procs.append(proc)
         return {"rc": 0, "stdout": "started in background", "stderr": ""}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -172,6 +200,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        _reap_background_procs()
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 

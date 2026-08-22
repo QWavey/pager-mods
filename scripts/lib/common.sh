@@ -185,7 +185,18 @@ topology_log() {
         local n
         n=$(wc -l <"$TOPOLOGY_LOG" 2>/dev/null || echo 0)
         if [ "$n" -gt 2000 ] 2>/dev/null; then
-            tail -n 1000 "$TOPOLOGY_LOG" >"${TOPOLOGY_LOG}.tmp" 2>/dev/null && mv "${TOPOLOGY_LOG}.tmp" "$TOPOLOGY_LOG" 2>/dev/null
+            # BUG FOUND AND FIXED: this log is written by multiple
+            # independent processes (sniff.sh's watchdog subshell, the
+            # main sniff.sh/reset.sh scripts, etc.) that can all call
+            # topology_log() around the same time - a shared, non-unique
+            # ".tmp" name meant two processes both deciding to prune in the
+            # same window could race on the SAME temp file, corrupting or
+            # losing log lines (one process's tail output clobbered before
+            # its own mv, or mv'd away out from under it). Per-process
+            # unique temp file (PID-suffixed) makes concurrent prunes
+            # independent instead of racing on shared state.
+            tail -n 1000 "$TOPOLOGY_LOG" >"${TOPOLOGY_LOG}.tmp.$$" 2>/dev/null && mv "${TOPOLOGY_LOG}.tmp.$$" "$TOPOLOGY_LOG" 2>/dev/null
+            rm -f "${TOPOLOGY_LOG}.tmp.$$" 2>/dev/null
         fi
     fi
 }
