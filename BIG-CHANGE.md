@@ -56,12 +56,19 @@ payloads/, then the two installer scripts.
     failure actually behaves on this hardware, which isn't available right
     now - recorded rather than guessed)
 14. [x] scripts/crash_logger.sh (adopted shared pid_running())
-15. [ ] scripts/deauth.sh
-16. [ ] scripts/dns.sh
-17. [ ] scripts/dnsspoof.sh
-18. [ ] scripts/examine.sh
-19. [ ] scripts/filters.sh
-20. [ ] scripts/gps.sh
+15. [x] scripts/deauth.sh - extracted shared launch_attack() (see commit log);
+    otherwise deliberately conservative given incident history
+16. [x] scripts/dns.sh (verdict: left as-is - trivial, already hardened)
+17. [x] scripts/dnsspoof.sh (verdict: left as-is - trivial, already hardened;
+    a --status/--list would need unconfirmed knowledge of where DNSSPOOF_*
+    persists entries, not guessed)
+18. [x] scripts/examine.sh - unified CLI/interactive validation into shared
+    validate_channel/validate_time/validate_bssid helpers
+19. [x] scripts/filters.sh - merged run_device()/run_network() (95%
+    identical) into one run_filter(), fixed a real interactive-mode bug
+    found in the process (a typo'd device/network silently fell back to
+    "network" before; now a clear error)
+20. [x] scripts/gps.sh (verdict: left as-is - trivial, already hardened)
 21. [ ] scripts/gui
 22. [ ] scripts/guiserver/server.py
 23. [ ] scripts/guiserver/static/app.js

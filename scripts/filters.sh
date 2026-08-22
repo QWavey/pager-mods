@@ -54,43 +54,44 @@ need_list() {
     [ "$#" -ge 1 ] || die "'$ACTION' needs a list name (allow or deny), e.g. filters.sh device $ACTION allow"
 }
 
-run_device() {
-    case "$ACTION" in
-        mode) need_list "$@"; with_mimic_paused PINEAPPLE_DEVICE_FILTER_MODE "$1" ;;
-        # BUG FOUND AND FIXED (found via code review - same class need_list
-        # itself already documents fixing for mode/clear/list, missed here):
-        # add/delete had no argument check at all, unlike every other
-        # action in this file - `filters.sh device add` with nothing
-        # further would splat an EMPTY "$@" straight into
-        # PINEAPPLE_DEVICE_FILTER_ADD, sending an incomplete command to the
-        # Hak5 API instead of failing here with a clear reason. Needs at
-        # least the list name AND one MAC to add/delete - a plain
-        # need_list "$@" (>=1) isn't quite enough on its own here since
-        # add/delete take a SECOND required piece (the actual value(s)),
-        # so check for that too.
-        add) [ "$#" -ge 2 ] || die "'add' needs a list name (allow/deny) and at least one MAC, e.g. filters.sh device add allow AA:BB:CC:DD:EE:FF"; with_mimic_paused PINEAPPLE_DEVICE_FILTER_ADD "$@" ;;
-        delete) [ "$#" -ge 2 ] || die "'delete' needs a list name (allow/deny) and at least one MAC, e.g. filters.sh device delete allow AA:BB:CC:DD:EE:FF"; with_mimic_paused PINEAPPLE_DEVICE_FILTER_DELETE "$@" ;;
-        clear) need_list "$@"; with_mimic_paused PINEAPPLE_DEVICE_FILTER_CLEAR "$1" ;;
-        list) need_list "$@"; PINEAPPLE_DEVICE_FILTER_LIST "$1" ;;
-        *) err "Unknown device action '$ACTION'"; usage ;;
+# BIG CHANGE: run_device()/run_network() used to be two hand-maintained,
+# 95%-identical copies of the same five-action dispatch (mode/add/delete/
+# clear/list), differing only in the PINEAPPLE_{DEVICE,NETWORK}_FILTER_*
+# command name and the item noun (MAC vs SSID) in the error messages - a fix
+# to one (like need_list's own history shows already happened once, and the
+# add/delete argument-count check almost happened again) could easily land
+# in one copy and be forgotten in the other. TYPE is always exactly "device"
+# or "network", and Hak5's own command naming already mirrors that 1:1, so
+# this builds the real command name from TYPE instead of maintaining two
+# copies of the same dispatch logic.
+run_filter() {
+    local type_upper noun cmd_prefix
+    # BUG FOUND AND FIXED (found via code review, while unifying this
+    # dispatch): the interactive picker below never actually validated its
+    # free-typed "device/network" answer - the OLD code's `if [ "$t" =
+    # "device" ]; then run_device; else run_network; fi` silently treated
+    # ANY typo as "network" (wrong, but at least ran a real command). This
+    # unified version needs its own explicit check instead of inheriting
+    # that same silent-wrong-fallback behavior, or a typo'd TYPE would
+    # instead build a broken "PINEAPPLE__FILTER_*" command name.
+    case "$TYPE" in
+        device) type_upper="DEVICE"; noun="MAC" ;;
+        network) type_upper="NETWORK"; noun="SSID" ;;
+        *) die "Unknown filter type '$TYPE' (expected device or network)" ;;
     esac
-}
-
-run_network() {
+    cmd_prefix="PINEAPPLE_${type_upper}_FILTER"
     case "$ACTION" in
-        mode) need_list "$@"; with_mimic_paused PINEAPPLE_NETWORK_FILTER_MODE "$1" ;;
-        # Same fix as run_device's add/delete above, same reasoning.
-        add) [ "$#" -ge 2 ] || die "'add' needs a list name (allow/deny) and at least one SSID, e.g. filters.sh network add allow \"My WiFi\""; with_mimic_paused PINEAPPLE_NETWORK_FILTER_ADD "$@" ;;
-        delete) [ "$#" -ge 2 ] || die "'delete' needs a list name (allow/deny) and at least one SSID, e.g. filters.sh network delete allow \"My WiFi\""; with_mimic_paused PINEAPPLE_NETWORK_FILTER_DELETE "$@" ;;
-        clear) need_list "$@"; with_mimic_paused PINEAPPLE_NETWORK_FILTER_CLEAR "$1" ;;
-        list) need_list "$@"; PINEAPPLE_NETWORK_FILTER_LIST "$1" ;;
-        *) err "Unknown network action '$ACTION'"; usage ;;
+        mode) need_list "$@"; with_mimic_paused "${cmd_prefix}_MODE" "$1" ;;
+        add) [ "$#" -ge 2 ] || die "'add' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE add allow ..."; with_mimic_paused "${cmd_prefix}_ADD" "$@" ;;
+        delete) [ "$#" -ge 2 ] || die "'delete' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE delete allow ..."; with_mimic_paused "${cmd_prefix}_DELETE" "$@" ;;
+        clear) need_list "$@"; with_mimic_paused "${cmd_prefix}_CLEAR" "$1" ;;
+        list) need_list "$@"; "${cmd_prefix}_LIST" "$1" ;;
+        *) err "Unknown $TYPE action '$ACTION'"; usage ;;
     esac
 }
 
 case "$TYPE" in
-    device) run_device "$@" ;;
-    network) run_network "$@" ;;
+    device|network) run_filter "$@" ;;
     -h|--help) usage ;;
     "")
         echo "== filters.sh interactive =="
@@ -102,7 +103,7 @@ case "$TYPE" in
                 TYPE="$t"; ACTION="$a"
                 if [ "$t" = "device" ]; then
                     val=$(ask "MAC(s) to $a (space-separated - MACs never contain spaces, safe to split)" "")
-                    run_device "$list" $val
+                    run_filter "$list" $val
                 else
                     # SSIDs can legitimately contain spaces, so a single
                     # free-text line can't safely be split on whitespace
@@ -111,12 +112,12 @@ case "$TYPE" in
                     # (filters.sh network add allow "SSID1" "SSID2") for
                     # multiple SSIDs in one call.
                     val=$(ask "SSID to $a (one at a time - use the CLI form for multiple)" "")
-                    run_network "$list" "$val"
+                    run_filter "$list" "$val"
                 fi
                 ;;
             *)
                 TYPE="$t"; ACTION="$a"
-                if [ "$t" = "device" ]; then run_device "$list"; else run_network "$list"; fi
+                run_filter "$list"
                 ;;
         esac
         ;;

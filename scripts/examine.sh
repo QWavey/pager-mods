@@ -28,6 +28,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# BIG CHANGE: the interactive menu below used to re-implement the exact
+# same BSSID/channel/time validation as the CLI path above, by hand, in
+# dense one-liners - the same checks, written twice in two different
+# styles, which is exactly how the two paths quietly drift (one gets a
+# fix, the other doesn't notice). Shared here so both paths call the same
+# validation instead of maintaining two copies of it.
+validate_channel() { case "$1" in ''|*[!0-9]*) die "'$1' doesn't look like a channel number (expected a whole number like 6 or 36)." ;; esac; }
+validate_time() { [ -n "$1" ] && case "$1" in *[!0-9]*) die "'$1' doesn't look like a whole number of seconds." ;; esac; }
+validate_bssid() { is_valid_mac "$1" || die "'$1' doesn't look like a valid BSSID (expected AA:BB:CC:DD:EE:FF)."; }
+
 if [ "$DO_RESET" = "1" ]; then
     PINEAPPLE_EXAMINE_RESET
     say "Resumed normal channel hopping."
@@ -42,15 +52,15 @@ fi
 # its exit code here would be pointless - not applied, on purpose), which
 # makes catching a bad value BEFORE the call the only real defense against
 # it silently doing nothing.
-[ -n "$CHANNEL" ] && case "$CHANNEL" in *[!0-9]*) die "'$CHANNEL' doesn't look like a channel number (expected a whole number like 6 or 36)." ;; esac
-[ -n "$TIME" ] && case "$TIME" in *[!0-9]*) die "'$TIME' doesn't look like a whole number of seconds." ;; esac
+[ -n "$CHANNEL" ] && validate_channel "$CHANNEL"
+validate_time "$TIME"
 
 if [ -n "$BSSID" ]; then
     # BUG FOUND AND FIXED (found via code review): a typo'd BSSID was
     # passed straight to PINEAPPLE_EXAMINE_BSSID with no format check -
     # unlike clientip.sh, which validates the same shape of input with
     # is_valid_mac (lib/common.sh) for exactly this reason.
-    is_valid_mac "$BSSID" || die "'$BSSID' doesn't look like a valid BSSID (expected AA:BB:CC:DD:EE:FF)."
+    validate_bssid "$BSSID"
     if [ -n "$TIME" ]; then PINEAPPLE_EXAMINE_BSSID "$BSSID" "$TIME"; else PINEAPPLE_EXAMINE_BSSID "$BSSID"; fi
     say "Locked to the channel used by $BSSID."
     exit 0
@@ -68,7 +78,7 @@ echo "2) Lock to a specific channel number"
 echo "3) Resume normal hopping"
 c=$(ask "Choose" "3")
 case "$c" in
-    1) b=$(ask "AP BSSID" ""); is_valid_mac "$b" || die "'$b' doesn't look like a valid BSSID (expected AA:BB:CC:DD:EE:FF)."; t=$(ask "Lock time in seconds (blank = until reset)" ""); [ -n "$t" ] && case "$t" in *[!0-9]*) die "'$t' doesn't look like a whole number of seconds." ;; esac; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_BSSID "$b" "$t"; else PINEAPPLE_EXAMINE_BSSID "$b"; fi ;;
-    2) ch=$(ask "Channel number" ""); case "$ch" in ''|*[!0-9]*) die "'$ch' doesn't look like a channel number (expected a whole number like 6 or 36)." ;; esac; t=$(ask "Lock time in seconds (blank = until reset)" ""); [ -n "$t" ] && case "$t" in *[!0-9]*) die "'$t' doesn't look like a whole number of seconds." ;; esac; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_CHANNEL "$ch" "$t"; else PINEAPPLE_EXAMINE_CHANNEL "$ch"; fi ;;
+    1) b=$(ask "AP BSSID" ""); validate_bssid "$b"; t=$(ask "Lock time in seconds (blank = until reset)" ""); validate_time "$t"; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_BSSID "$b" "$t"; else PINEAPPLE_EXAMINE_BSSID "$b"; fi ;;
+    2) ch=$(ask "Channel number" ""); validate_channel "$ch"; t=$(ask "Lock time in seconds (blank = until reset)" ""); validate_time "$t"; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_CHANNEL "$ch" "$t"; else PINEAPPLE_EXAMINE_CHANNEL "$ch"; fi ;;
     *) PINEAPPLE_EXAMINE_RESET ;;
 esac
