@@ -1,4 +1,79 @@
-# Session Summary (part 2 - late night)
+# Session Summary (2026-08-22)
+
+## What happened, in order
+
+1. **"Keep SSH alive while sniffing" feature** (bridge eth0+eth1, DHCP lease
+   on the bridge) was iterated live. Real bugs found and fixed: a stale
+   route on the enslaved interface, a self-defeating teardown order
+   (releasing DHCP/tearing down the bridge *before* restoring eth0 to
+   br-lan, in three places), and the underlying `pid_running()` regression.
+2. An `eth0` down/up "link flap" was added to force the tethered client to
+   renew its DHCP lease automatically. Tested live and made things worse
+   (a full device lockout needing physical recovery) - traced to `eth0`
+   being documented as the SoC's own USB-Ethernet **gadget controller**,
+   not a plain PHY, so toggling it isn't a safe assumption. **Reverted**
+   (commit `1fe4fe7`). Known limitation documented instead: manual client
+   DHCP renew if needed.
+3. **LAN Sniffer payload/display fixes** (commit `bcfe0f6`):
+   - Removed the `--dhcp` prompt from the payload (kept in `sniff.sh` for
+     manual use) - it had no visible payoff without the reverted flap.
+   - The bridge setup used to be one big blocking call with zero visible
+     progress. Now streams a live, reset.sh-style progress bar while it
+     runs (`BRIDGE_PROGRESS_FILE` in `sniff.sh`, tailed by the payload).
+   - `run_creds_watcher()` rewritten to tag live HTTP/creds hits with
+     source IP and destination host (`[HTTP] 1.2.3.4 -> example.com ...`)
+     instead of raw, context-free header lines. Verified against both
+     synthetic data and busybox's real `awk` on the device.
+   - **Honest finding**: all of today's real captures had zero plaintext
+     HTTP/DNS - traffic was pure encrypted IPv6 TCP. The new tagging is
+     confirmed correct; it can't show URLs that were never sent in the
+     clear. Not a code bug.
+4. **Two more live reports, fixed/documented locally** (commit `6db1d6b`,
+   **not yet deployed** - device went offline before `setup.py` could run):
+   - Duration picker's exact-string match hardened (leftover "pick a
+     time" prompt reported even after choosing Infinite) + a 1s settle
+     pause before it, in case of an input-timing race.
+   - **Open, unconfirmed**: internet access died for the tethered PC
+     during a plain `--bridge` (no `--dhcp`) - DNS to the local resolver
+     worked through the bridge, but TCP SYNs to the public internet got
+     zero replies. `br_netfilter` was checked and ruled out with direct
+     evidence (module not loaded, sysctls don't exist on this kernel).
+     True cause still open - see README.md's postmortem section for the
+     exact next diagnostic steps (a second WiFi-based SSH session so the
+     device stays reachable while reproducing it).
+   - Also reported, not yet investigated: stopping a capture sometimes
+     shows the platform's own generic "Stop payload execution / Exit
+     payload log" menu instead of this payload's own save-log flow -
+     likely the platform's own kill-payload control, unconfirmed.
+
+## State right now
+
+- Git: all work is **committed** on `master` through `6db1d6b`. Nothing
+  uncommitted.
+- Device: **not fully up to date** - it has commit `bcfe0f6`'s fixes
+  deployed (confirmed live), but **not** `6db1d6b`'s two hardening fixes.
+  Run `python setup.py` next time the device is reachable to push them.
+- No background jobs, no pending live tests, nothing waiting on input.
+
+## Next steps (for next session)
+
+1. `python setup.py` to deploy the pending duration-picker hardening.
+2. Re-test Bridge/tap live with a WiFi Management-AP session open as a
+   safety net (`scripts/mgmt.sh`), specifically to reproduce and diagnose
+   the internet-outage issue with `nft list ruleset` counters / `ip -s
+   link` watched *during* the outage, not just after.
+3. Investigate the "Stop payload execution / Exit payload log" report if
+   it recurs - likely needs Hak5 platform SDK docs on button/control
+   precedence, which weren't available this session.
+
+---
+
+# Archived: previous session (part 2 - late night)
+
+*(Kept for the record - this documents earlier, unrelated work: the
+custom-payload-visibility bug chain, deadnet.sh's discovery rewrite, and
+setup.py becoming the single deploy entry point. Superseded by everything
+above, not by anything below.)*
 
 ## The real bug: custom payloads invisible on the physical Payloads screen
 
