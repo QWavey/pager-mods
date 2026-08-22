@@ -1,0 +1,88 @@
+#!/bin/bash
+# help - List every command in this toolkit with a one-line description.
+# Run `NAME --help` for full details on any one of them.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "Pager Toolkit - available commands (run any with --help for full details)"
+echo
+
+summary_of() {
+    # First "# NAME.sh - description" style line, description part only.
+    awk '
+        NR==1 { next }
+        /^#/ {
+            line = $0
+            sub(/^#[[:space:]]*/, "", line)
+            if (line ~ / - /) { sub(/^[^-]* - /, "", line); print line; exit }
+            if (line != "") { print line; exit }
+        }
+        !/^#/ { exit }
+    ' "$1"
+}
+
+print_row() {
+    local name="$1" file="$2"
+    printf "  %-14s %s\n" "$name" "$(summary_of "$file")"
+}
+
+echo "-- Networking / WiFi --"
+print_row "wifictl"   "$SCRIPT_DIR/wifi.sh"
+print_row "connect"   "$SCRIPT_DIR/connect.sh"
+print_row "mgmt"      "$SCRIPT_DIR/mgmt.sh"
+print_row "openap"    "$SCRIPT_DIR/openap.sh"
+print_row "mimic"     "$SCRIPT_DIR/mimic.sh"
+print_row "filters"   "$SCRIPT_DIR/filters.sh"
+print_row "ssidpool"  "$SCRIPT_DIR/ssidpool.sh"
+print_row "deauth"    "$SCRIPT_DIR/deauth.sh"
+print_row "examine"   "$SCRIPT_DIR/examine.sh"
+print_row "bands"     "$SCRIPT_DIR/bands.sh"
+echo
+echo "-- Recon / Capture --"
+print_row "reconsession" "$SCRIPT_DIR/reconsession.sh"
+print_row "pcap"      "$SCRIPT_DIR/pcap.sh"
+print_row "wigle"     "$SCRIPT_DIR/wigle.sh"
+print_row "gps"       "$SCRIPT_DIR/gps.sh"
+print_row "clientip"  "$SCRIPT_DIR/clientip.sh"
+print_row "tracer"    "$SCRIPT_DIR/tracer.sh"
+echo
+echo "-- Attacks / Engagements --"
+print_row "eviltwin"  "$SCRIPT_DIR/EvilTwin.sh"
+print_row "deadnet"   "$SCRIPT_DIR/deadnet.sh"
+print_row "dnsspoof"  "$SCRIPT_DIR/dnsspoof.sh"
+print_row "bluetooth" "$SCRIPT_DIR/bluetooth.sh"
+echo
+echo "-- LAN --"
+print_row "lanscan"   "$SCRIPT_DIR/LanScan.sh"
+print_row "sniff"     "$SCRIPT_DIR/sniff.sh"
+print_row "pc_link"   "$SCRIPT_DIR/pc_link.sh"
+echo
+echo "-- Remote access --"
+print_row "vpn"       "$SCRIPT_DIR/vpn.sh"
+print_row "autosshctl" "$SCRIPT_DIR/autossh.sh"
+echo
+echo "-- Payloads --"
+print_row "payloadrunner" "$SCRIPT_DIR/PayloadRunner.sh"
+echo
+echo "-- Device --"
+print_row "battery"   "$SCRIPT_DIR/battery.sh"
+print_row "screen"    "$SCRIPT_DIR/screen.sh"
+print_row "led"       "$SCRIPT_DIR/led.sh"
+print_row "dns"       "$SCRIPT_DIR/dns.sh"
+print_row "alert"     "$SCRIPT_DIR/alert.sh"
+print_row "ringtone"  "$SCRIPT_DIR/ringtone.sh"
+print_row "loot"      "$SCRIPT_DIR/loot.sh"
+print_row "report"    "$SCRIPT_DIR/report.sh"
+print_row "config"    "$SCRIPT_DIR/config.sh"
+print_row "devreset"  "$SCRIPT_DIR/reset.sh"
+print_row "usb_monitor" "$SCRIPT_DIR/usb_monitor.sh"
+print_row "crash_logger" "$SCRIPT_DIR/crash_logger.sh"
+echo
+echo "-- Control Panel (web GUI) --"
+print_row "gui"       "$SCRIPT_DIR/gui"
+print_row "webui"     "$SCRIPT_DIR/webui.sh"
+echo
+echo "Note: 'wifi', 'autossh', and 'reset' are reserved by real OpenWRT/"
+echo "system commands (/sbin/wifi, /usr/sbin/autossh, /usr/bin/reset - the"
+echo "terminal-reset utility) - use 'wifictl'/'autosshctl'/'devreset' for"
+echo "this toolkit's versions instead."

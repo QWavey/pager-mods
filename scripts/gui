@@ -1,0 +1,23 @@
+#!/bin/bash
+# gui - Launch the Pager Control Panel in the foreground. Ctrl+C to stop.
+# (For a backgrounded/detached version instead, use `webui --start`.)
+set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOL_NAME="gui"
+CFG_NS="webui"
+. "$SCRIPT_DIR/lib/common.sh"
+
+PORT="${1:-8081}"
+
+if [ -z "$(cfg_get token)" ]; then
+    echo "[gui] No access token set yet - generating one..."
+    TOKEN=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-')
+    [ -z "$TOKEN" ] && TOKEN=$(echo "$RANDOM$(date +%s)$$" | md5sum | cut -c1-32)
+    cfg_set token "$TOKEN"
+    echo "[gui] Token: $TOKEN  (saved - webui.sh --set-token to change it)"
+fi
+
+PY=$(resolve_python3) || { echo "[gui] ERROR: python3 is not installed. Run: opkg update && opkg install -d mmc python3" >&2; exit 1; }
+
+# shellcheck disable=SC2086
+exec $PY "$SCRIPT_DIR/guiserver/server.py" "$PORT"

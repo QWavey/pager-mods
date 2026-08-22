@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pager Control Panel</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Pager Control Panel</h1>
+  <div id="battery" class="pill">--</div>
+</header>
+
+<main>
+
+  <section class="card">
+    <h2>WiFi Master</h2>
+    <p class="hint">One switch to silence (or restore) Management/Open/WPA APs, the WiFi client, and recon hopping.</p>
+    <div class="row">
+      <button id="wifiOn" class="btn btn-good">Turn WiFi ON</button>
+      <button id="wifiOff" class="btn btn-danger">Turn WiFi OFF</button>
+      <button id="wifiStatus" class="btn">Refresh Status</button>
+    </div>
+    <pre id="wifiStatusOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Evil Twin (Clone AP)</h2>
+    <p class="hint">Uses official WIFI_WPA_AP / WIFI_OPEN_AP. Uplink auto-detects Ethernet vs WiFi client.</p>
+    <div class="grid">
+      <label>Cloned SSID <input id="etSsid" type="text" placeholder="Network to clone"></label>
+      <label>Password (blank = open AP) <input id="etPw" type="password" placeholder="optional"></label>
+      <label>Uplink
+        <select id="etUplink">
+          <option value="auto">auto</option>
+          <option value="eth">ethernet</option>
+          <option value="wifi">wifi client</option>
+        </select>
+      </label>
+      <label>Uplink WiFi SSID (only if Uplink = wifi client) <input id="etWifiSsid" type="text" placeholder="required for wifi client uplink"></label>
+      <label>Uplink WiFi Password (only if Uplink = wifi client) <input id="etWifiPw" type="password" placeholder="blank = open network"></label>
+      <label class="checkbox"><input id="etHidden" type="checkbox"> Hidden SSID</label>
+      <label class="checkbox"><input id="etMimic" type="checkbox"> Mimic mode (karma)</label>
+      <label class="checkbox"><input id="etRecord" type="checkbox"> Record (WIFI_PCAP)</label>
+    </div>
+    <div class="row">
+      <button id="etStart" class="btn btn-good">Start Clone AP</button>
+      <button id="etOn" class="btn">Restore Last (--on)</button>
+      <button id="etStop" class="btn btn-danger">Stop</button>
+      <button id="etStatus" class="btn">Status</button>
+    </div>
+    <pre id="etOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>LAN Scan</h2>
+    <p class="hint">Wraps nmap over the eth1 (USB-C) interface.</p>
+    <div class="row">
+      <select id="lanMode">
+        <option value="ping">ping (fastest)</option>
+        <option value="quick" selected>quick</option>
+        <option value="service">service detection</option>
+        <option value="full">full (all ports)</option>
+        <option value="vuln">vuln scripts</option>
+      </select>
+      <button id="lanScan" class="btn btn-good">Auto LAN Scan</button>
+    </div>
+    <pre id="lanOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>LAN Kill (DeadNet)</h2>
+    <p class="hint">Not available from the Control Panel on purpose - ARP-poisoning the whole LAN deserves the CLI's discovery-first flow (see who's actually there before you commit), not a blind one-click button. Use SSH: <code>deadnet --discover</code> then <code>deadnet</code>, or the DeadNet LAN Kill payload on-device.</p>
+    <pre id="lanKillOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>LAN Sniffer</h2>
+    <p class="hint">Checks which of the two wired PC links (USB-C / USB-A) are connected, then captures + auto-summarizes traffic on one of them.</p>
+    <div class="row">
+      <button id="sniffAdapters" class="btn">Check Adapters</button>
+    </div>
+    <div class="grid">
+      <label>Interface <input id="sniffIface" type="text" placeholder="eth1"></label>
+      <label>Duration (sec) <input id="sniffDuration" type="text" placeholder="30"></label>
+    </div>
+    <div class="row">
+      <button id="sniffStart" class="btn btn-good">Start Capture (background)</button>
+      <button id="sniffStop" class="btn btn-danger">Stop</button>
+      <button id="sniffStatus" class="btn">Status</button>
+    </div>
+    <pre id="sniffOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>PC Link</h2>
+    <p class="hint">Detects whatever PC is directly wired in (USB-C tether or USB-A adapter) and captures+summarizes its traffic.</p>
+    <div class="row">
+      <button id="pcLinkDetect" class="btn">Detect</button>
+    </div>
+    <div class="grid">
+      <label>Duration (sec) <input id="pcLinkDuration" type="text" placeholder="30"></label>
+    </div>
+    <div class="row">
+      <button id="pcLinkCapture" class="btn btn-good">Capture</button>
+    </div>
+    <pre id="pcLinkOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Bluetooth</h2>
+    <p class="hint">No official Hak5 Bluetooth commands exist for the Pager - this drives the real BlueZ stack (hcitool/l2ping/btmgmt) directly. A target already connected+streaming to its real owner usually refuses new connections outright - flood/jam report "NOT REACHABLE" plainly when that happens, not silent nothing.</p>
+    <div class="row">
+      <button id="btScan" class="btn">Scan (15s, classic+BLE)</button>
+    </div>
+    <div class="grid">
+      <label>Flood target MAC <input id="btFloodMac" type="text" placeholder="AA:BB:CC:DD:EE:FF"></label>
+    </div>
+    <div class="row">
+      <button id="btFloodStart" class="btn btn-danger">Flood Target</button>
+      <button id="btJamStart" class="btn btn-danger">Jam Whole Area</button>
+      <button id="btAdvspamStart" class="btn btn-danger">Adv-Spam Area</button>
+      <button id="btStop" class="btn">Stop</button>
+      <button id="btStatus" class="btn">Status</button>
+    </div>
+    <pre id="btOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>WiFi Deauth</h2>
+    <p class="hint">Runs continuously (repeat deauth every couple seconds) until you press Stop. Authorized network only!</p>
+    <div class="grid">
+      <label>AP BSSID <input id="deauthBssid" type="text" placeholder="AA:BB:CC:DD:EE:FF"></label>
+      <label>Target client (blank = all) <input id="deauthTarget" type="text" placeholder="FF:FF:FF:FF:FF:FF"></label>
+      <label>Channel <input id="deauthChannel" type="text" placeholder="6"></label>
+    </div>
+    <div class="row">
+      <button id="deauthSend" class="btn btn-danger">Start Deauth</button>
+      <button id="deauthStop" class="btn">Stop</button>
+    </div>
+    <pre id="deauthOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>PineAP</h2>
+    <div class="row">
+      <button id="mimicOn" class="btn btn-good">Mimic ON</button>
+      <button id="mimicOff" class="btn btn-danger">Mimic OFF</button>
+    </div>
+    <div class="grid">
+      <label>Open AP SSID <input id="openSsid" type="text"></label>
+      <div class="row">
+        <button id="openOn" class="btn btn-good">Open AP ON</button>
+        <button id="openOff" class="btn btn-danger">Open AP OFF</button>
+      </div>
+      <label>Mgmt AP SSID <input id="mgmtSsid" type="text"></label>
+      <label>Mgmt AP Password <input id="mgmtPw" type="password"></label>
+      <div class="row">
+        <button id="mgmtOn" class="btn btn-good">Mgmt AP ON</button>
+        <button id="mgmtOff" class="btn btn-danger">Mgmt AP OFF</button>
+      </div>
+    </div>
+    <pre id="pineapOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Recon</h2>
+    <div class="row">
+      <button id="hopPause" class="btn">Pause Hopping</button>
+      <button id="hopResume" class="btn btn-good">Resume Hopping</button>
+      <button id="reconNew" class="btn">New Session</button>
+    </div>
+    <pre id="reconOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Payload Runner</h2>
+    <p class="hint">The Pager's real payload system (bash + Hak5 DuckyScript). No HID injection - see the toolkit README for why.</p>
+    <div class="row">
+      <select id="payloadSelect"><option>Loading...</option></select>
+      <button id="payloadRefresh" class="btn">Refresh List</button>
+    </div>
+    <div class="row">
+      <label class="checkbox"><input id="payloadBg" type="checkbox" checked> Run in background</label>
+      <button id="payloadRun" class="btn btn-good">Run Payload</button>
+    </div>
+    <pre id="payloadOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Loot</h2>
+    <div class="row">
+      <button id="lootList" class="btn">Refresh Summary</button>
+      <button id="lootArchive" class="btn">Archive Now</button>
+    </div>
+    <pre id="lootOut" class="out"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Report</h2>
+    <p class="hint">One readable summary of everything the toolkit has captured this session (handshakes, LAN scans, sniff captures, Bluetooth, PC link, etc). Read-only.</p>
+    <div class="row">
+      <button id="reportRefresh" class="btn">Generate Report</button>
+    </div>
+    <pre id="reportOut" class="out"></pre>
+  </section>
+
+</main>
+
+<footer>
+  <p>Every action here calls the same official WIFI_*/PINEAPPLE_*/PAYLOAD_* commands you'd run over SSH - this page is just a control surface, nothing is reimplemented.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+scapy
+# netifaces is optional on the Pager (not in opkg, needs a C compiler to
+# build) - deadnet.py falls back to scapy's own route table when it's
+# missing. Install it too on platforms where it's easy to get, if you want.
+# netifaces
