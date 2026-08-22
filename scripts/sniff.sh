@@ -740,11 +740,21 @@ start_lan_watchdog() {
                 _now=$(date +%s 2>/dev/null)
                 case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
                 if [ "$_now" -gt 0 ] && [ "$_now" -ge "$_deadline" ]; then
+                    # BUG FOUND AND FIXED (same reordering fix as
+                    # --unbridge, applied here too for consistency/
+                    # defense-in-depth - this watchdog already runs
+                    # detached from any SSH session so it isn't directly
+                    # exposed to the same failure, but there's no reason
+                    # to leave the riskier order here when the safer one
+                    # costs nothing): stop_bridge_dhcp() releases the DHCP
+                    # lease, which can remove br-sniff's own address -
+                    # moved to AFTER eth0 is back in br-lan, matching
+                    # --unbridge's own fix.
+                    ip_link set eth0 master br-lan 2>/dev/null
+                    ip_link set eth0 up 2>/dev/null
                     stop_bridge_dhcp
                     ip_link set "$BRIDGE_NAME" down 2>/dev/null
                     ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
-                    ip_link set eth0 master br-lan 2>/dev/null
-                    ip_link set eth0 up 2>/dev/null
                     echo "[sniff.sh watchdog] Bridge exceeded ${MAX_BRIDGE_SECS}s - automatically torn down, eth0 restored to br-lan (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
                     rm -f "$BRIDGE_STARTED_FILE" "$WATCHDOG_PIDFILE"
                     exit 0
@@ -773,38 +783,80 @@ stop_lan_watchdog() {
         rm -f "$WATCHDOG_PIDFILE"
     fi
     rm -f "$BRIDGE_STARTED_FILE"
-    stop_bridge_dhcp
+    # BUG FOUND AND FIXED (CRITICAL, second half of the same live-caught
+    # incident as --unbridge's own reordering fix below): stop_bridge_dhcp()
+    # used to run HERE, unconditionally, as literally the FIRST thing
+    # --unbridge does - but stop_bridge_dhcp() sends udhcpc a release
+    # signal, which (confirmed against busybox's own default.script
+    # behavior) runs its "deconfig" step and REMOVES the IP address from
+    # br-sniff. If the calling session is itself connected via that exact
+    # address (the whole point of --dhcp), this alone could sever the
+    # connection running --unbridge BEFORE it ever reaches the eth0
+    # restoration step further down - the same failure mode as the
+    # ordering bug just fixed there, just one step earlier and easy to
+    # miss for that reason. Moved out of here entirely - the caller now
+    # invokes stop_bridge_dhcp() explicitly, AFTER eth0 is already back in
+    # br-lan, not before.
 }
 
 if [ "$DO_UNBRIDGE" = "1" ]; then
-    stop_lan_watchdog
     if ! ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
+        stop_lan_watchdog
+        stop_bridge_dhcp
         say "No bridge ($BRIDGE_NAME) is up."
         exit 0
     fi
+    # Kill the watchdog's own interval-check loop now (safe - it's just a
+    # background bash process, touches no networking directly) - but NOT
+    # stop_bridge_dhcp yet (see that function's own comment on why this
+    # split matters: releasing the DHCP lease can remove br-sniff's own
+    # address, which would sever a session connected through it before
+    # eth0 is safely back in br-lan).
+    if [ -f "$WATCHDOG_PIDFILE" ]; then
+        kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
+        rm -f "$WATCHDOG_PIDFILE"
+    fi
+    rm -f "$BRIDGE_STARTED_FILE"
+    # BUG FOUND AND FIXED (CRITICAL, live-caught the hard way - this is
+    # exactly what left a real device unreachable at BOTH addresses,
+    # needing a physical reset, right after --dhcp made SSH-over-br-sniff
+    # possible): eth0 used to get restored to br-lan LAST, only after
+    # `ip_link set "$BRIDGE_NAME" down` had already run - but bringing
+    # br-sniff down is EXACTLY the moment a session connected through
+    # br-sniff's own address (the whole point of --dhcp) loses its
+    # underlying transport. If the SSH child process gets killed right
+    # then (a very real, confirmed-live outcome, not a hypothetical), the
+    # script never reaches the eth0-restoration line at all - the device
+    # is left with NEITHER address working (br-sniff torn half-down,
+    # eth0 not yet back in br-lan), unrecoverable except by physical
+    # access. `ip link set eth0 master br-lan` reassigns eth0's bridge
+    # membership directly (the kernel handles detaching from its old
+    # master implicitly - no need to bring br-sniff down first at all),
+    # so doing this FIRST means the moment it completes, 172.16.52.1 is
+    # already reachable again regardless of what happens to the rest of
+    # this teardown (tearing down br-sniff/eth1) or to the calling
+    # session itself.
+    ip_link set eth0 master br-lan 2>/dev/null
+    ip_link set eth0 up 2>/dev/null
+    # NOW safe to release the DHCP lease (see stop_lan_watchdog()'s own
+    # comment on why this had to move to AFTER eth0 is back in br-lan) -
+    # even if this removes br-sniff's own address, a session connected
+    # through it already lost that path the instant eth0 left br-sniff
+    # two lines up, so there's nothing left to protect by delaying this
+    # further.
+    stop_bridge_dhcp
     ip_link set "$BRIDGE_NAME" down
     ip_link delete "$BRIDGE_NAME" type bridge
-    # BUG FOUND AND FIXED (live-diagnosed, CRITICAL): deleting a bridge
-    # detaches its former member interfaces but does NOT put them back
-    # into any other bridge - eth0 was left completely masterless here,
-    # not restored to br-lan. eth0 is br-lan's ONLY physical port on this
-    # hardware, and br-lan is what SSH-over-USB-C access actually depends
-    # on - every --unbridge was silently leaving the device unreachable
-    # over that link until something else (the watchdog, or manual
-    # recovery) happened to notice and fix it. The old "back to being
-    # independent" message was also just wrong: eth0's normal home is
-    # br-lan, not masterless. Restore it explicitly here instead of
-    # hoping the watchdog (already stopped, one line up) catches it.
-    #
     # BUG FOUND AND FIXED (live-caught): the delete call's own success was
     # never checked - confirmed live that it can transiently fail (a
     # netlink socket still settling right after a disruptive bridge
     # teardown), leaving $BRIDGE_NAME existing as an empty, orphaned
     # bridge device while this still unconditionally claimed "Bridge torn
-    # down." eth0 restoration (the part that actually matters for SSH) is
-    # unaffected either way, but the message should tell the truth about
-    # the bridge device itself too. Short retry (same reasoning as
-    # canonicalize_lan_topology's own) before reporting honestly.
+    # down." eth0 restoration (the part that actually matters for SSH,
+    # already done above regardless) is unaffected either way, but the
+    # message should tell the truth about the bridge device itself too.
+    # Short retry (same reasoning as canonicalize_lan_topology's own)
+    # before reporting honestly.
     tries=0
     while [ "$tries" -lt 3 ] && ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; do
         tries=$((tries + 1))
@@ -813,8 +865,6 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
             ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
         fi
     done
-    ip_link set eth0 master br-lan 2>/dev/null
-    ip_link set eth0 up 2>/dev/null
     if ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
         err "eth0 restored to br-lan (management access is fine), but $BRIDGE_NAME itself could not be removed - it's left behind as an empty, harmless bridge device. Try 'sniff.sh --unbridge' again, or 'ip link delete $BRIDGE_NAME type bridge' by hand."
     else

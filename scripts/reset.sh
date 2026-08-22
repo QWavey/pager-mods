@@ -321,56 +321,27 @@ reset_bluetooth() {
 # over-USB-C work at all. br-sniff should not exist outside an active
 # LAN Sniffer bridge session.
 reset_network() {
-    # sniff.sh's --bridge starts its own lightweight LAN watchdog for as
-    # long as the bridge is up (auto re-attaches eth0 to br-lan if it
-    # ever gets knocked loose) - stop it here too so a full reset doesn't
-    # leave it running uncoordinated alongside whatever this does.
+    # BUG FOUND AND FIXED (CRITICAL, live-caught the hard way - the same
+    # incident/root cause as sniff.sh's own --unbridge reordering fix, see
+    # that file's comment for the full story): this function used to kill
+    # the bridge watchdog/DHCP client and tear br-sniff down FIRST, and
+    # only restore eth0 to br-lan (via the network reload below) LAST. If
+    # reset.sh itself is invoked over a session connected through
+    # br-sniff's own address (a real, intended way to reach the device
+    # now that --bridge --dhcp exists), releasing the DHCP lease or
+    # bringing br-sniff down can sever that exact connection BEFORE the
+    # actual fix (restoring eth0 to br-lan) ever runs - leaving the device
+    # unreachable at BOTH addresses, exactly what was reported live.
+    # Restoring eth0/br-lan FIRST means the critical fix has already taken
+    # effect by the time anything br-sniff-related gets touched, so a
+    # severed calling session can't stop it from working. Only the
+    # WATCHDOG'S OWN interval-check loop gets stopped here (a background
+    # bash process - stopping it touches no networking, so it's always
+    # safe to do first); the DHCP release and br-sniff teardown itself
+    # move to after the reload/restore below.
     if [ -f /tmp/pager-sniff-watchdog.pid ]; then
         kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null
         rm -f /tmp/pager-sniff-watchdog.pid
-    fi
-    # BIG CHANGE (same "every teardown path must clean up, not just the
-    # happy one" discipline as the watchdog stop above): --bridge --dhcp
-    # (see sniff.sh's own start_bridge_dhcp) can leave a udhcpc client
-    # running against br-sniff - stop it here too, same pattern.
-    if [ -f /tmp/pager-sniff-bridge-dhcp.pid ]; then
-        _dhcp_pid=$(cat /tmp/pager-sniff-bridge-dhcp.pid 2>/dev/null)
-        [ -n "$_dhcp_pid" ] && kill "$_dhcp_pid" 2>/dev/null
-        rm -f /tmp/pager-sniff-bridge-dhcp.pid
-    fi
-    say "Tearing down any leftover LAN Sniffer bridge (br-sniff)..."
-    # BUG FOUND AND FIXED (CRITICAL): these `ip link` calls had no timeout
-    # either - the exact same netlink-hang risk already fixed for sniff.sh
-    # itself this session (see that file's own `ip_link` wrapper), but
-    # here in reset.sh's OWN recovery path. This is the very first thing
-    # reset_network does, ahead of the network-reload step - if the
-    # network stack is wedged badly enough for THIS call to hang, the
-    # reload/retry safety net below never even gets reached.
-    #
-    # BUG FOUND AND FIXED (bug-hunt pass): these three calls still used a
-    # hardcoded inline `timeout 5 ip link ...` instead of the shared
-    # ip_link() wrapper lib/common.sh now provides (and this exact file
-    # already uses everywhere else, e.g. canonicalize_lan_topology()
-    # below) - a real, if narrow, behavioral divergence: PAGER_IP_LINK_TIMEOUT
-    # silently would NOT apply to these three specific calls while applying
-    # to every other one in the toolkit.
-    if ip_link show br-sniff >/dev/null 2>&1; then
-        ip_link set br-sniff down >/dev/null 2>&1
-        ip_link delete br-sniff type bridge >/dev/null 2>&1
-        # BUG FOUND AND FIXED (live-caught, same class just fixed in
-        # sniff.sh's own --unbridge): this claimed "br-sniff removed"
-        # unconditionally - confirmed live that the delete call can
-        # transiently fail (a netlink socket still settling right after a
-        # disruptive bridge teardown), leaving br-sniff existing as an
-        # empty, orphaned device while reset.sh - the dedicated recovery
-        # tool, of all things - reported success anyway.
-        if ip_link show br-sniff >/dev/null 2>&1; then
-            err "br-sniff still exists after attempting to remove it - it's an empty, harmless bridge device at this point, but 'ip link delete br-sniff type bridge' by hand (or re-running this reset) may be needed to fully clear it."
-        else
-            say "br-sniff removed."
-        fi
-    else
-        say "No br-sniff bridge found."
     fi
     say "Reloading network config from the device's own saved settings (standard OpenWRT operation - doesn't change anything, just re-applies what's already configured)..."
     # BUG FOUND AND FIXED (live-diagnosed - CRITICAL, this is very likely
@@ -418,6 +389,45 @@ reset_network() {
         say "eth0/br-lan confirmed correct."
     else
         err "eth0 still isn't in br-lan after the reload and a direct re-attach attempt - this needs a manual check (\`ip link show eth0\`, \`brctl show br-lan\`)."
+    fi
+    # NOW safe to release any --dhcp lease and tear br-sniff down - eth0 is
+    # already back in br-lan by this point regardless of what happens to
+    # a session connected through br-sniff's own address (see this
+    # function's own header comment for why this moved to here).
+    if [ -f /tmp/pager-sniff-bridge-dhcp.pid ]; then
+        _dhcp_pid=$(cat /tmp/pager-sniff-bridge-dhcp.pid 2>/dev/null)
+        [ -n "$_dhcp_pid" ] && kill "$_dhcp_pid" 2>/dev/null
+        rm -f /tmp/pager-sniff-bridge-dhcp.pid
+    fi
+    # BUG FOUND AND FIXED (CRITICAL): these `ip link` calls had no timeout
+    # either - the exact same netlink-hang risk already fixed for sniff.sh
+    # itself this session (see that file's own `ip_link` wrapper), but
+    # here in reset.sh's OWN recovery path.
+    #
+    # BUG FOUND AND FIXED (bug-hunt pass): these three calls still used a
+    # hardcoded inline `timeout 5 ip link ...` instead of the shared
+    # ip_link() wrapper lib/common.sh now provides (and this exact file
+    # already uses everywhere else, e.g. canonicalize_lan_topology()
+    # above) - a real, if narrow, behavioral divergence: PAGER_IP_LINK_TIMEOUT
+    # silently would NOT apply to these three specific calls while applying
+    # to every other one in the toolkit.
+    if ip_link show br-sniff >/dev/null 2>&1; then
+        ip_link set br-sniff down >/dev/null 2>&1
+        ip_link delete br-sniff type bridge >/dev/null 2>&1
+        # BUG FOUND AND FIXED (live-caught, same class just fixed in
+        # sniff.sh's own --unbridge): this claimed "br-sniff removed"
+        # unconditionally - confirmed live that the delete call can
+        # transiently fail (a netlink socket still settling right after a
+        # disruptive bridge teardown), leaving br-sniff existing as an
+        # empty, orphaned device while reset.sh - the dedicated recovery
+        # tool, of all things - reported success anyway.
+        if ip_link show br-sniff >/dev/null 2>&1; then
+            err "br-sniff still exists after attempting to remove it - it's an empty, harmless bridge device at this point, but 'ip link delete br-sniff type bridge' by hand (or re-running this reset) may be needed to fully clear it."
+        else
+            say "br-sniff removed."
+        fi
+    else
+        say "No br-sniff bridge found."
     fi
     say "Done - eth0/br-lan should be back to normal. If you're reading this, SSH survived the reload; if a session that ran this one dropped instead, that's expected (the network briefly re-initializes) - just reconnect."
 }
