@@ -1,5 +1,38 @@
 # Big Change Sweep
 
+## Round 2 honesty note (the skill got stricter, and it was right to)
+
+The first pass through this file recorded 42 files with a "kept change" - but on
+re-reading the sharpened skill (its new "'Real' is not 'big'" section names, almost
+verbatim, several of exactly what round 1 did: `ip_link()`/`pid_running()` extraction,
+`run_device`+`run_network` merging, added `--status`/`--list` flags), the honest
+verdict is: **round 1 was an `/improve` sweep, correctly executed, wearing this
+skill's name.** Every one of those 42 changes was real and safely verified - none of
+them should be reverted - but almost none of them were actually *big* (structural,
+rearchitecture-scale). That's being said plainly here rather than re-labeled.
+
+Round 2 (this pass) went looking specifically for changes that clear the real bar -
+genuine rearchitectures, not tweaks - rather than re-touching all 55 files a second
+time. Two were found, planned, and built:
+
+1. **A shared, declarative LAN-topology reconciler** (`lib/common.sh` +
+   `sniff.sh` + `reset.sh`) - replaces two independently hand-written, subtly
+   different "is eth0 where it belongs" implementations (one of which caused a real,
+   live-diagnosed incident) with one canonical subsystem. New capability, not a
+   dedup: a `topology_log()` forensic trail survives a SIGKILL. Verified with an
+   8-case local logic test (all passing) against stubbed system primitives.
+2. **Unified frame-reconnection detection in `deauth.sh`** (`watch_for_reconnect()`) -
+   collapses the sentinel and reactive-strike watch loops' byte-for-byte-duplicated
+   tcpdump/grep sequence (the exact logic behind this file's two hardest-won live
+   bugs) into one function. Deliberately did NOT force `find_target_bssid()`/
+   `discover_clients()` into the same shape after confirming they do genuinely
+   different jobs - forcing them would have changed behavior, not just deduplicated.
+
+Everything below this note is the **round 1 record** (files 1-55, improve-tier,
+correctly attributed as such now) - kept for reference, not re-labeled as big.
+
+---
+
 Full file-by-file big-change pass over every file we authored in this toolkit.
 Baseline backed up to `C:\Users\flori\Downloads\pineapple\BACKUP\pager-setup_2026-08-22_09-32-01`
 and committed to a fresh local git repo (commit `a27267d`, "Baseline before big-change sweep").
