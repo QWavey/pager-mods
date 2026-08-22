@@ -124,11 +124,26 @@ pick_duration() {
     # option list ("A default option must always be provided!"). Restored
     # here (defaulting to "Timer", the original pre-regression default).
     __choice=$(LIST_PICKER "Duration" "Timer" "Infinite (until B)" "Timer") || return 1
-    if [ "$__choice" = "Infinite (until B)" ]; then
-        echo ""
-    else
-        NUMBER_PICKER "Capture duration (seconds)" 30 || return 1
-    fi
+    # HARDENING (reported live - "a prompt that says 'pick a time' shows
+    # up even after Infinite was picked, I need to click it away"): an
+    # exact `= "Infinite (until B)"` match is brittle against anything
+    # the platform might do to the returned string (trailing whitespace,
+    # a truncated/reformatted echo of a long option on a small screen) -
+    # any mismatch silently fell through to the `else` and popped
+    # NUMBER_PICKER right after Infinite was already chosen. Matching on
+    # just the leading "Infinite" via a case pattern (and trimming
+    # surrounding whitespace first) is tolerant of that without being any
+    # less correct - "Timer" can never start with "Infinite". Root cause
+    # not fully confirmed without a live re-test (could also be an
+    # input-event timing race with the ALERT right before this call,
+    # addressed separately below), so this is a defensive fix either way,
+    # not a guess dressed up as a confirmed one.
+    __choice="${__choice#"${__choice%%[![:space:]]*}"}"
+    __choice="${__choice%"${__choice##*[![:space:]]}"}"
+    case "$__choice" in
+        Infinite*) echo "" ;;
+        *) NUMBER_PICKER "Capture duration (seconds)" 30 || return 1 ;;
+    esac
 }
 
 # maybe_save_log SUMMARY_TEXT - asks whether to save the full session
@@ -416,6 +431,14 @@ case "$__mode" in
         # against anything else unforeseen, same reasoning as the --bridge
         # call above.
         trap 'timeout 30 /root/scripts/sniff.sh --unbridge -y >/dev/null 2>&1' EXIT
+        # HARDENING (see pick_duration's own note on the leftover-prompt
+        # report): a brief settle pause between the ALERT above and the
+        # very next on-screen prompt reduces the chance of a button press
+        # meant to dismiss the ALERT (or pressed impatiently during the
+        # progress bar just before it) leaking into LIST_PICKER's own
+        # first render. Cheap and harmless either way - not a confirmed
+        # fix, since the exact mechanism wasn't reproduced live.
+        sleep 1
         __dur=$(pick_duration) || exit 0
         # BUG FOUND AND FIXED: this never checked whether run_live_capture
         # actually got anywhere (see its own new liveness check) before

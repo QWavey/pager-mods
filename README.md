@@ -114,6 +114,46 @@ second SSH session already open (`scripts/mgmt.sh` to enable the
 Management AP) as a safety net **before** touching `eth0` again, not
 live on the same connection being disrupted.
 
+**OPEN INVESTIGATION (not yet root-caused - do not guess a fix without a
+live re-test): the tethered PC's internet access can die during a plain
+`--bridge` (no `--dhcp` involved).** Live-observed via
+`sniff.sh --iface br-sniff`'s own packet log during a real Bridge/tap
+run: a DNS query to the LAN's local resolver (a private/ULA IPv6
+address) went out and got a correct answer back through the bridge, but
+every subsequent TCP SYN from the same client to the public internet
+(Google's IPv6 ranges) got zero replies - repeated retries, no SYN-ACK,
+no RST, for the whole capture window. That's a real, reproducible
+outage, not the DHCP-renewal issue the rest of this postmortem is about
+(this client was on IPv6 SLAAC, not DHCP - there's no "stale lease" to
+renew here). `br_netfilter` was checked and ruled out with direct
+evidence (module not loaded, `/proc/sys/net/bridge/bridge-nf-call-*`
+don't even exist on this kernel) - the standard "bridged traffic
+accidentally hits the firewall's FORWARD chain" explanation doesn't
+apply here. True root cause is still open: worth re-checking whether
+`fw4`'s zone/interface-name matching (its `wan`/`lan` zones are keyed to
+`eth1`/`wlan0cli`/`br-lan` by name, not aware of the ad-hoc `br-sniff`
+sniff.sh creates outside UCI) somehow still applies to `br-sniff`
+traffic despite `br_netfilter` being absent, or whether this was simply
+an unrelated ISP/WAN hiccup at that exact moment - both are plausible
+and neither is confirmed. Next step when the device is available again:
+reproduce with a second, WiFi-based SSH session open (`scripts/mgmt.sh`)
+so the state can be inspected (`nft list ruleset` counters, `ip -s link`
+drop counts) WHILE the outage is happening, instead of only after the
+fact.
+
+**Tiny UX reports from the same session, not yet confirmed by a live
+retest:** (1) the duration picker (Timer/Infinite) could show a leftover
+"pick a time" `NUMBER_PICKER` prompt even after "Infinite" was chosen -
+hardened the comparison in `pick_duration()` to match tolerantly instead
+of an exact string equality, and added a 1s settle pause before that
+picker in case it was actually an input-event timing race with the
+ALERT right before it; (2) stopping a running capture sometimes surfaced
+the platform's own generic "Stop payload execution / Exit payload log"
+menu instead of this payload's own confirm-then-save-log flow - most
+likely the platform's own kill-payload control being used instead of
+this payload's B-button handling, which this script has no way to
+override, but not confirmed without seeing it reproduced live.
+
 ## Structure
 
 - `scripts/` - the real tools (deauth, bluetooth, sniff, tracer, recon
