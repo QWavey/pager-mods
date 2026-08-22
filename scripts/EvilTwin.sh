@@ -265,6 +265,12 @@ setup_uplink() {
             mode="wifi"
         fi
     fi
+    # BIG CHANGE (see the health check right after the AP comes up, below):
+    # exposed as a global so the caller can tell, after the fact, whether
+    # this run actually used the risky same-radio combo the "wifi" branch
+    # below only ever WARNS about - "mode" was previously local and thrown
+    # away the moment this function returned.
+    RESOLVED_UPLINK_MODE="$mode"
 
     case "$mode" in
         eth)
@@ -342,6 +348,25 @@ else
         say "Enabling PineAP mimic mode (karma - answers any probed SSID)."
         PINEAPPLE_MIMIC_ENABLE
     fi
+fi
+
+# BIG CHANGE: setup_uplink()'s own "wifi" branch already WARNS up front that
+# combining a WiFi-client uplink with PineAP AP mode on the SAME radio0 has
+# shown real firmware instability on this hardware (an "out of range" bug
+# that usually needs a reboot to clear) - but until now that warning was the
+# only defense; nothing ever checked whether it actually happened. Confirmed-
+# up per WIFI_WPA_AP/WIFI_OPEN_AP not dying doesn't mean the interface is
+# genuinely healthy afterward if the two radio roles collided - so when that
+# risky combination was actually used this run, check the AP interface's
+# real operstate now and say so immediately and specifically if it looks
+# wedged, instead of leaving the first sign of trouble to be "a client can't
+# connect, and it turns out a reboot was needed."
+if [ "$RESOLVED_UPLINK_MODE" = "wifi" ]; then
+    _opstate=$(cat "/sys/class/net/$AP_IFACE/operstate" 2>/dev/null)
+    case "$_opstate" in
+        up|unknown) : ;;
+        *) err "The clone AP interface ($AP_IFACE) doesn't look healthy right after coming up alongside the WiFi uplink on radio0 (operstate: '${_opstate:-unknown/missing}') - this matches the known same-radio driver instability this script warns about. A reboot (reset.sh --reboot) is likely needed before retrying; Ethernet uplink (--uplink eth) avoids this combination entirely." ;;
+    esac
 fi
 
 # The AP is confirmed up at this point (both WIFI_WPA_AP/WIFI_OPEN_AP

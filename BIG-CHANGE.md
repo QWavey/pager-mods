@@ -27,8 +27,8 @@ look busier" is a legitimate, honestly-recorded verdict here, per the skill's ow
 Order: foundation (`lib/common.sh`) first, then alphabetical by path within scripts/, then
 payloads/, then the two installer scripts.
 
-1. [ ] scripts/lib/common.sh
-2. [ ] scripts/lib/raw_deauth.py
+1. [x] scripts/lib/common.sh
+2. [x] scripts/lib/raw_deauth.py
 3. [ ] scripts/EvilTwin.sh
 4. [ ] scripts/LanScan.sh
 5. [ ] scripts/PayloadRunner.sh
