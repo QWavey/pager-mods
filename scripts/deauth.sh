@@ -308,7 +308,11 @@ RECON_DB="/root/recon/recon.db"
 # afford to be stricter than a mid-attack re-scan can.
 RECON_FRESH_SECONDS=180
 
-is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+# BIG CHANGE (adopting common.sh's shared primitive, extracted from this
+# exact duplicated check earlier in this sweep): backed by the one
+# canonical pid_running() in lib/common.sh instead of independently
+# maintaining this same "PIDFILE + kill -0" logic here too.
+is_running() { pid_running "$PIDFILE"; }
 
 # Sentinel (dual-radio passive sensing for --reactive - see
 # start_sentinel()'s own header comment further down for the full
@@ -325,7 +329,7 @@ is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/d
 # found" the one time it actually needs to run.
 SENTINEL_PIDFILE="/tmp/pager-deauth-sentinel.pid"
 SENTINEL_STATE="/tmp/pager-deauth-sentinel-sighting"
-sentinel_running() { [ -f "$SENTINEL_PIDFILE" ] && kill -0 "$(cat "$SENTINEL_PIDFILE" 2>/dev/null)" 2>/dev/null; }
+sentinel_running() { pid_running "$SENTINEL_PIDFILE"; }
 stop_sentinel() {
     if sentinel_running; then
         kill "$(cat "$SENTINEL_PIDFILE")" 2>/dev/null
@@ -1670,15 +1674,23 @@ run_all_loop() {
     say "Stopped."
 }
 
-if [ "$DO_ALL" = "1" ]; then
-    [ -f "$RECON_DB" ] || die "Recon database not found at $RECON_DB - has recon run yet?"
-    command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found on this device."
-    if [ "$ASSUME_YES" != "1" ]; then
-        confirm "Continuously deauth EVERY AP recon has seen (all their clients, via broadcast target), until stopped? Only do this on networks/clients you are authorized to test!" || die "Aborted."
-    fi
+# BIG CHANGE: the "is_running && die; background-launch; write PIDFILE;
+# sleep 1; verify it's actually alive; report or die honestly" sequence
+# below was duplicated, hand-copied, at all THREE attack-launch call sites
+# (--all, --ssid/multi-pairs, single --bssid) - the exact kind of
+# duplication that let real bugs (the missing tcpdump "-e" flag, the wrong
+# frame-type labels) survive in some copies after already being fixed in
+# others, earlier this session. One shared implementation now; only the
+# loop function actually invoked (and its args) varies per call site.
+# Usage: launch_attack FUNCTION_NAME [ARGS...] - FUNCTION_NAME is called by
+# name (not eval'd as a string), so normal bash quoting/array-expansion at
+# the call site works exactly as it did when each site built its own
+# subshell inline.
+launch_attack() {
+    local fn="$1"; shift
     is_running && die "Already running (PID $(cat "$PIDFILE")). Use --stop first."
     if [ "$BACKGROUND" = "1" ]; then
-        ( trap '' HUP; run_all_loop ) >/tmp/pager-deauth.log 2>&1 &
+        ( trap '' HUP; "$fn" "$@" ) >/tmp/pager-deauth.log 2>&1 &
         echo $! > "$PIDFILE"
         # BUG FOUND AND FIXED (found via code review, same class already
         # fixed this pass in sniff.sh/tracer.sh/PayloadRunner.sh/
@@ -1696,8 +1708,17 @@ if [ "$DO_ALL" = "1" ]; then
             die "Attack exited immediately - check /tmp/pager-deauth.log for why."
         fi
     else
-        run_all_loop
+        "$fn" "$@"
     fi
+}
+
+if [ "$DO_ALL" = "1" ]; then
+    [ -f "$RECON_DB" ] || die "Recon database not found at $RECON_DB - has recon run yet?"
+    command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found on this device."
+    if [ "$ASSUME_YES" != "1" ]; then
+        confirm "Continuously deauth EVERY AP recon has seen (all their clients, via broadcast target), until stopped? Only do this on networks/clients you are authorized to test!" || die "Aborted."
+    fi
+    launch_attack run_all_loop
     exit 0
 fi
 
@@ -1710,28 +1731,10 @@ if [ "${#MULTI_PAIRS[@]}" -gt 0 ]; then
             confirm "Continuously deauth $TARGET across ${#MULTI_PAIRS[@]} AP(s) broadcasting '$SSID_NAME' until stopped? Only run this against networks/clients you're authorized to test." || die "Aborted."
         fi
     fi
-    is_running && die "Already running (PID $(cat "$PIDFILE")). Use --stop first."
-    if [ "$BACKGROUND" = "1" ]; then
-        if [ "$REACTIVE" = "1" ]; then
-            ( trap '' HUP; run_reactive_strike "$TARGET" "${MULTI_PAIRS[@]}" ) >/tmp/pager-deauth.log 2>&1 &
-        else
-            ( trap '' HUP; run_multi_bssid_loop "$TARGET" "${MULTI_PAIRS[@]}" ) >/tmp/pager-deauth.log 2>&1 &
-        fi
-        echo $! > "$PIDFILE"
-        # Same liveness-check fix as --all above.
-        sleep 1
-        if is_running; then
-            say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
-        else
-            rm -f "$PIDFILE"
-            die "Attack exited immediately - check /tmp/pager-deauth.log for why."
-        fi
+    if [ "$REACTIVE" = "1" ]; then
+        launch_attack run_reactive_strike "$TARGET" "${MULTI_PAIRS[@]}"
     else
-        if [ "$REACTIVE" = "1" ]; then
-            run_reactive_strike "$TARGET" "${MULTI_PAIRS[@]}"
-        else
-            run_multi_bssid_loop "$TARGET" "${MULTI_PAIRS[@]}"
-        fi
+        launch_attack run_multi_bssid_loop "$TARGET" "${MULTI_PAIRS[@]}"
     fi
     exit 0
 fi
@@ -1769,26 +1772,8 @@ if [ "$ASSUME_YES" != "1" ]; then
     fi
 fi
 
-is_running && die "Already running (PID $(cat "$PIDFILE")). Use --stop first."
-if [ "$BACKGROUND" = "1" ]; then
-    if [ "$REACTIVE" = "1" ]; then
-        ( trap '' HUP; run_reactive_strike "$TARGET" "$BSSID~$CHANNEL" ) >/tmp/pager-deauth.log 2>&1 &
-    else
-        ( trap '' HUP; run_attack_loop "$BSSID" "$TARGET" "$CHANNEL" ) >/tmp/pager-deauth.log 2>&1 &
-    fi
-    echo $! > "$PIDFILE"
-    # Same liveness-check fix as --all/--ssid above.
-    sleep 1
-    if is_running; then
-        say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
-    else
-        rm -f "$PIDFILE"
-        die "Attack exited immediately - check /tmp/pager-deauth.log for why."
-    fi
+if [ "$REACTIVE" = "1" ]; then
+    launch_attack run_reactive_strike "$TARGET" "$BSSID~$CHANNEL"
 else
-    if [ "$REACTIVE" = "1" ]; then
-        run_reactive_strike "$TARGET" "$BSSID~$CHANNEL"
-    else
-        run_attack_loop "$BSSID" "$TARGET" "$CHANNEL"
-    fi
+    launch_attack run_attack_loop "$BSSID" "$TARGET" "$CHANNEL"
 fi
