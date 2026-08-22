@@ -74,7 +74,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+# BIG CHANGE (adopting common.sh's shared primitive): backed by the one
+# canonical pid_running() in lib/common.sh instead of yet another copy of
+# the same "PIDFILE + kill -0" check duplicated across this toolkit.
+is_running() { pid_running "$PIDFILE"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then

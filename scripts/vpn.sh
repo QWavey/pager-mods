@@ -15,6 +15,7 @@
 #   vpn.sh wireguard --enable [wg.conf]
 #   vpn.sh wireguard --enable-full SERVER_IP SERVER_PORT SERVER_PUBKEY SERVER_PSK PRIVATE_KEY LOCAL_IP IPV4_NETS IPV6_NETS
 #   vpn.sh wireguard --disable
+#   vpn.sh --status         best-effort: is a VPN actually up right now
 #   vpn.sh                interactive mode
 
 set -u
@@ -59,13 +60,42 @@ run_wireguard() {
     esac
 }
 
+# BIG CHANGE: this file's own header comment above already calls out that
+# a silently-failed VPN enable is worse here than in most sibling scripts -
+# real traffic could believe it's protected when it isn't - but until now
+# the only signal was OPENVPN_CONFIGURE/WIREGUARD_CONFIGURE's own exit
+# code at enable-time, never a way to check again later whether it's
+# ACTUALLY still up. Best-effort, clearly labeled: OpenVPN via a real
+# process check (ps), Wireguard via 'wg show' (the standard wireguard-
+# tools command) if installed - neither guessed at unconfirmed platform
+# internals.
+do_status() {
+    say "VPN status (best-effort):"
+    if ps w 2>/dev/null | grep -q '[o]penvpn'; then
+        say "OpenVPN: a live 'openvpn' process was found - looks up."
+    else
+        say "OpenVPN: no live 'openvpn' process found - looks down (or was never enabled)."
+    fi
+    if command -v wg >/dev/null 2>&1; then
+        if wg show 2>/dev/null | grep -q .; then
+            say "Wireguard: 'wg show' reports an active interface - looks up."
+        else
+            say "Wireguard: 'wg show' reports nothing active - looks down."
+        fi
+    else
+        say "Wireguard: 'wg' tool not found on this device - can't check status this way."
+    fi
+}
+
 case "$KIND" in
+    --status) do_status ;;
     openvpn) run_openvpn "$@" ;;
     wireguard) run_wireguard "$@" ;;
     -h|--help) usage ;;
     "")
         echo "== vpn.sh =="
-        k=$(ask "VPN type (openvpn/wireguard)" "wireguard")
+        k=$(ask "VPN type (openvpn/wireguard/status)" "wireguard")
+        if [ "$k" = "status" ]; then do_status; exit 0; fi
         a=$(ask "Action (--enable/--disable)" "--disable")
         KIND="$k"; ACTION="$a"
         if [ "$a" = "--enable" ]; then

@@ -124,12 +124,21 @@ payloads/, then the two installer scripts.
     flag-less CLI actions) had NO success/failure reporting at all, despite
     this file's own header comment claiming that class was already fixed
     everywhere in it
-41. [ ] scripts/tracer.sh
-42. [ ] scripts/usb_monitor.sh
-43. [ ] scripts/vpn.sh
-44. [ ] scripts/webui.sh
-45. [ ] scripts/wifi.sh
-46. [ ] scripts/wigle.sh
+41. [x] scripts/tracer.sh - adopted shared pid_running()
+42. [x] scripts/usb_monitor.sh - adopted shared pid_running(); otherwise
+    left alone (exceptionally well-hardened already)
+43. [x] scripts/vpn.sh - added --status (best-effort: openvpn via ps,
+    wireguard via `wg show`), directly following through on this file's own
+    stated concern about silent VPN failures
+44. [x] scripts/webui.sh - adopted shared pid_running()
+45. [x] scripts/wifi.sh (verdict: left as-is - exceptionally well-hardened
+    already, real failure-tracking kill switch with honest reporting; no
+    genuine gap found)
+46. [x] scripts/wigle.sh - fixed two real gaps: --upload had zero success/
+    failure check (the one action whose whole point is a real network
+    call to Wigle.net); interactive choice 4 (Stop log) was missing both
+    the timeout and any feedback, unlike every other choice in the same
+    menu
 47. [ ] payloads/general/bluetooth_jam/payload.sh
 48. [ ] payloads/general/custom_lan_scan/payload.sh
 49. [ ] payloads/general/lan_sniffer/payload.sh
