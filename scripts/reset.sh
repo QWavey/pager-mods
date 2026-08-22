@@ -300,9 +300,17 @@ reset_network() {
     # reset_network does, ahead of the network-reload step - if the
     # network stack is wedged badly enough for THIS call to hang, the
     # reload/retry safety net below never even gets reached.
-    if timeout 5 ip link show br-sniff >/dev/null 2>&1; then
-        timeout 5 ip link set br-sniff down >/dev/null 2>&1
-        timeout 5 ip link delete br-sniff type bridge >/dev/null 2>&1
+    #
+    # BUG FOUND AND FIXED (bug-hunt pass): these three calls still used a
+    # hardcoded inline `timeout 5 ip link ...` instead of the shared
+    # ip_link() wrapper lib/common.sh now provides (and this exact file
+    # already uses everywhere else, e.g. canonicalize_lan_topology()
+    # below) - a real, if narrow, behavioral divergence: PAGER_IP_LINK_TIMEOUT
+    # silently would NOT apply to these three specific calls while applying
+    # to every other one in the toolkit.
+    if ip_link show br-sniff >/dev/null 2>&1; then
+        ip_link set br-sniff down >/dev/null 2>&1
+        ip_link delete br-sniff type bridge >/dev/null 2>&1
         # BUG FOUND AND FIXED (live-caught, same class just fixed in
         # sniff.sh's own --unbridge): this claimed "br-sniff removed"
         # unconditionally - confirmed live that the delete call can
@@ -310,7 +318,7 @@ reset_network() {
         # disruptive bridge teardown), leaving br-sniff existing as an
         # empty, orphaned device while reset.sh - the dedicated recovery
         # tool, of all things - reported success anyway.
-        if timeout 5 ip link show br-sniff >/dev/null 2>&1; then
+        if ip_link show br-sniff >/dev/null 2>&1; then
             err "br-sniff still exists after attempting to remove it - it's an empty, harmless bridge device at this point, but 'ip link delete br-sniff type bridge' by hand (or re-running this reset) may be needed to fully clear it."
         else
             say "br-sniff removed."
