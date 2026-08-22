@@ -193,8 +193,23 @@ reset_processes() {
     # reliably bounded per script (worst case ~30s x 7 scripts if every
     # single one were simultaneously this slow, vs. a truly unbounded
     # hang before any of this session's fixes).
+    # BIG CHANGE (found via code review): this loop, reset_wifi(), and
+    # reset_bluetooth() below were the last three functions in this file
+    # still printing "Done." unconditionally, regardless of whether their
+    # underlying calls actually succeeded - the exact "unconditional
+    # success message" class already fixed throughout the rest of this
+    # toolkit (and the whole reason reset_network() below has its own
+    # verify-then-fix postcondition check instead of just trusting a
+    # return code). Every --stop handler in this toolkit is confirmed to
+    # always exit 0 on its normal paths (whether something was actually
+    # running or not - see e.g. bluetooth.sh/sniff.sh's own --stop), so a
+    # non-zero exit here is a genuine signal something went wrong, not a
+    # false alarm from "nothing was running."
+    local failed_scripts=""
     for s in deauth bluetooth sniff tracer EvilTwin deadnet wigle; do
-        [ -x "$SCRIPT_DIR/$s.sh" ] && timeout 30 "$SCRIPT_DIR/$s.sh" --stop >/dev/null 2>&1
+        if [ -x "$SCRIPT_DIR/$s.sh" ]; then
+            timeout 30 "$SCRIPT_DIR/$s.sh" --stop >/dev/null 2>&1 || failed_scripts="$failed_scripts $s.sh"
+        fi
     done
     # Defense-in-depth (same reasoning as deauth.sh's own stray-process
     # fix this session): each script's own --stop only catches what it
@@ -204,7 +219,11 @@ reset_processes() {
     # a clean signal). No `pkill` on this busybox build (confirmed earlier
     # this session) - `killall` (by name) is the real tool available here.
     command -v killall >/dev/null 2>&1 && { killall tcpdump >/dev/null 2>&1; killall l2ping >/dev/null 2>&1; }
-    say "Done."
+    if [ -n "$failed_scripts" ]; then
+        err "These scripts' --stop returned a non-zero exit (unexpected - every --stop handler in this toolkit normally exits 0 either way):$failed_scripts"
+    else
+        say "Done."
+    fi
 }
 
 reset_wifi() {
@@ -221,8 +240,14 @@ reset_wifi() {
     # fast (0.5s, 0.8s across two live calls) - no sign of the transient
     # slowness found in EvilTwin.sh's PINEAPPLE_MIMIC_DISABLE. 10s stays,
     # already a comfortable margin above observed reality.
-    timeout 10 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1
-    say "Done."
+    # BIG CHANGE: this printed "Done." unconditionally regardless of
+    # PINEAPPLE_EXAMINE_RESET's real exit code - see reset_processes()'s
+    # comment above for why this whole file gets the same treatment now.
+    if timeout 10 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; then
+        say "Done."
+    else
+        err "PINEAPPLE_EXAMINE_RESET failed or timed out - the WiFi channel lock may not actually have been cleared."
+    fi
 }
 
 reset_bluetooth() {
@@ -232,13 +257,20 @@ reset_bluetooth() {
     # same kind of thing (talking to the Bluetooth radio/HCI socket) that
     # could just as easily hang if the BT stack is in a bad state. Bounded
     # all three the same way, for consistency and the same reason.
-    command -v hcitool >/dev/null 2>&1 && timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1
-    command -v btmgmt >/dev/null 2>&1 && timeout 5 btmgmt clr-adv >/dev/null 2>&1
+    # BIG CHANGE: same "Done." unconditionally, regardless of whether any
+    # of these actually succeeded - see reset_processes()'s comment above.
+    local failed=0
+    command -v hcitool >/dev/null 2>&1 && { timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1 || failed=1; }
+    command -v btmgmt >/dev/null 2>&1 && { timeout 5 btmgmt clr-adv >/dev/null 2>&1 || failed=1; }
     if command -v hciconfig >/dev/null 2>&1; then
-        timeout 5 hciconfig hci0 down >/dev/null 2>&1
-        timeout 5 hciconfig hci0 up >/dev/null 2>&1
+        timeout 5 hciconfig hci0 down >/dev/null 2>&1 || failed=1
+        timeout 5 hciconfig hci0 up >/dev/null 2>&1 || failed=1
     fi
-    say "Done."
+    if [ "$failed" = "1" ]; then
+        err "One or more Bluetooth reset commands failed or timed out - the radio may still be in a bad state."
+    else
+        say "Done."
+    fi
 }
 
 # VERIFIED STANDARD STATE (live, on this exact device, via `uci show

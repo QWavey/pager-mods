@@ -109,7 +109,9 @@ payloads/, then the two installer scripts.
     class of drift this file's own history already shows happened twice
     for real (pc_link's directory, wigle/payload-runs/archive missing
     entirely from an earlier version)
-36. [ ] scripts/reset.sh
+36. [x] scripts/reset.sh - reset_wifi()/reset_bluetooth()/reset_processes()
+    now report honestly instead of unconditional "Done." (this was the
+    bug-hunt finding flagged earlier this session, now actually applied)
 37. [ ] scripts/ringtone.sh
 38. [ ] scripts/screen.sh
 39. [ ] scripts/sniff.sh
