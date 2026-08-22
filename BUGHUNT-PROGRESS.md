@@ -100,6 +100,37 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
   `python -m py_compile` on all three .py files: 100% clean, nothing
   accidentally broken by this session's edits.
 
+## Full-toolkit coverage checkpoint (this run)
+
+Every file has now been read at least once this run (many multiple times,
+several 2-3x across earlier phases of this session too):
+
+- scripts/*.sh (all 39 CLI scripts, plus `gui`/`help`): reviewed, fixes
+  above applied where found.
+- payloads/general/*/payload.sh (all 7 non-deadnet payloads): reviewed,
+  no new bugs beyond what earlier phases already fixed.
+- scripts/guiserver/server.py + static/{app.js,index.html,style.css}:
+  reviewed, ALLOWED_SCRIPTS/LOG_FILES cross-checked against real scripts
+  and log paths (no drift found), index.html element IDs cross-checked
+  against app.js references (no drift found).
+- setup.py, sync.py: reviewed in full, no new bugs.
+- scripts/lib/common.sh core primitives (say/err/die, cfg_get/set/del,
+  need_arg, is_valid_mac, pid_running, print_help): reviewed, all correct.
+- Targeted pattern sweeps (unquoted comparisons, unquoted SSID/password
+  usage in platform commands, $RANDOM usage): clean, nothing found beyond
+  what's already fixed/documented.
+- .deploy_state.json sanity-checked against the real local file tree: no
+  stale entries.
+- deauth.sh (1783 lines, the largest/most complex file): re-read start,
+  attack-loop functions (run_attack_loop/attack_ap_pairs/escalate_check/
+  find_target_bssid/start_sentinel/run_reactive_strike/run_multi_bssid_loop/
+  run_all_loop/launch_attack), and the final dispatch - no new bugs; this
+  file has clearly already been through many live-diagnosed hardening
+  rounds in earlier phases of this session.
+
+deadnet.sh / deadnet_lan_kill payload remain explicitly out of scope per
+standing user instruction.
+
 ## Improvement-shaped ideas parked (not acted on here - see /quick-map output)
 
 (filled in if any surface)
