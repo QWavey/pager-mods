@@ -363,6 +363,43 @@ summarize_pcap() {
 # end-of-capture summary).
 HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
 
+# watcher_block_bounds LINENO - given the (pre-computed, newline-
+# separated) list of tcpdump -A packet-header line numbers in
+# $blocks_lines, finds the enclosing block's [start, end) line range for
+# LINENO. Cheap: operates on a short list of plain integers, not on
+# packet text - this is what keeps watcher_tag_hit() below fast even
+# though blocks_lines itself can have thousands of entries (one per
+# packet).
+watcher_block_bounds() {
+    awk -v ln="$1" '
+        { if ($1 <= ln) { bs = $1 } else if (!be) { be = $1 } }
+        END { if (!be) be = 2000000000; print bs "\t" be }
+    ' <<<"$blocks_lines"
+}
+
+# watcher_tag_hit DUMPFILE LINENO - resolves the source IP (from the
+# hit's enclosing packet's own header line) and destination Host header
+# (if this packet's block has one), for exactly ONE match line. Called
+# only for the handful of lines run_creds_watcher's grep passes actually
+# flagged - never scans the whole dump itself, which is what makes this
+# affordable even though the full-file grep passes that feed it are
+# already the expensive part (see run_creds_watcher's own comment).
+# Echoes "SRC<TAB>HOST".
+watcher_tag_hit() {
+    local dumpfile="$1" lineno="$2" bounds bs be src host
+    bounds=$(watcher_block_bounds "$lineno")
+    bs=$(cut -f1 <<<"$bounds"); be=$(cut -f2 <<<"$bounds")
+    src=$(sed -n "${bs}p" "$dumpfile" | awk '{
+        for (i = 1; i <= NF; i++) {
+            if ($i == ">") { s = $(i - 1); sub(/\.[0-9]+$/, "", s); print s; exit }
+        }
+    }')
+    [ -z "$src" ] && src="?"
+    host=$(sed -n "${bs},$((be - 1))p" "$dumpfile" | grep -m1 -ioE '^host: .*' | sed 's/^[Hh]ost: *//; s/\r$//')
+    [ -z "$host" ] && host="?"
+    printf '%s\t%s' "$src" "$host"
+}
+
 # run_creds_watcher OUTPUT_FILE - INVENTED FEATURE: summarize_pcap only
 # ever scanned for credentials/HTTP activity AFTER the whole capture
 # finished - fine for a quick 30s capture, but for a long --background
@@ -372,43 +409,47 @@ HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
 # "watch it happen live, Wireshark-style" experience this was built for.
 # This periodically (every 5s) re-scans the growing capture file and
 # prints any NEW credential hit (red) or HTTP request/Host line the
-# moment it's seen - live, into whatever the capture's own live output is
-# (the terminal in the foreground case, /tmp/pager-sniff.log in the
-# --background case, which is also what the LAN Sniffer payload's
-# on-device live scroller already tails). Tracks each pattern's own seen-
-# count separately so neither re-alerts the same match every cycle.
+# moment it's seen, tagged with source IP and destination host - live,
+# into whatever the capture's own live output is (the terminal in the
+# foreground case, /tmp/pager-sniff.log in the --background case, which
+# is also what the LAN Sniffer payload's on-device live scroller already
+# tails). Tracks each pattern's own seen-count separately so neither
+# re-alerts the same match every cycle.
 #
-# MEASURED AND CHANGED: this used to be two separate functions (one for
-# creds, one originally planned as a separate url-watcher) - each doing
-# its OWN full `tcpdump -A -r file` re-read of the whole capture every
-# cycle. Re-reading a growing file from the start twice per cycle instead
-# of once doubles real CPU work for no benefit on a device that's already
-# memory/CPU-constrained (251MB RAM total, confirmed live) - merged into
-# one pass that checks both patterns from a SINGLE read per cycle.
-#
-# REGRESSION FOUND AND REVERTED (self-inflicted, caught via live timing):
-# a later attempt replaced the two `grep -iE` calls below with a single
-# awk pass that tagged each hit with its packet's source IP and Host
-# header (a real, wanted improvement - "IP -> URL" like bettercap). It
-# worked on small synthetic input, but measured live against a real
-# 18.8k-line `tcpdump -A` dump on this device: the plain `grep -iE
-# "$CREDS_PATTERN"` below takes ~14-22s (already slow, but bounded); the
-# equivalent awk `$0 ~ credspat` dynamic-regex match over every line
-# TIMED OUT past 60s - 4x+ slower for the identical pattern and data,
-# apparently because busybox awk's dynamic (`-v`-supplied) regex matching
-# is far more expensive per line than grep's compiled-once engine. Net
-# effect confirmed live: the awk version never produced a single live tag
-# for a real capture with a real plaintext HTTP request in it (the
-# post-capture summary found it fine; the live watcher's re-scan simply
-# never finished before the next poll, or the capture itself, ended).
-# That's strictly worse than this original version, which - despite also
-# being too slow to keep up with a genuinely busy capture - at least
-# keeps pace during quieter/shorter ones. Reverted rather than ship a
-# confirmed regression; a real fix (grep for the fast full-file filter,
-# then a cheap per-match lookup for just the handful of actual hits
-# instead of a per-line dynamic regex over the whole dump) was prototyped
-# but not yet verified correct - left for a future session, not guessed
-# into production under time pressure.
+# HISTORY: a first version here grepped raw HTTP/creds lines with no
+# source or destination context - reported live, twice, as not the
+# "IP -> URL, like bettercap/Wireshark" view actually wanted. A second
+# version tried to fix that with a single awk pass doing a per-line
+# DYNAMIC regex match (`$0 ~ credspat`) plus block-tracking - measured
+# live against a real 18.8k-line dump on this device, that awk pass timed
+# out past 60s (vs. the plain `grep -iE "$CREDS_PATTERN"` below's already-
+# slow ~14-22s) - 4x+ slower for identical work, apparently because
+# busybox awk's dynamic (`-v`-supplied) regex matching is far more
+# expensive per line than grep's compiled-once engine. It never produced
+# a single live tag for a real capture with a real plaintext HTTP request
+# in it. THIS version keeps the two full-file scans on grep (the fast
+# part, unavoidable expense) and only spends extra work - the
+# watcher_tag_hit() lookups above - on the small number of lines those
+# scans actually flag, never on the whole dump. Verified live: correctly
+# tagged a real HTTP request with its real source IPv6 address and
+# "example.com" as the host, and a synthetic credential hit with its
+# source IP, host, and the matched text. Honest limits, unchanged from
+# either prior version or newly noticed while verifying this one:
+#   - The CREDS_PATTERN grep pass alone still takes ~15-25s against a
+#     genuinely busy capture on this hardware, so this still isn't truly
+#     sub-5s "live" for a busy capture - it just reliably produces
+#     correct output eventually instead of none at all.
+#   - tcpdump -A decorates a packet it recognizes as HTTP with its OWN
+#     one-line protocol summary appended to that packet's header line,
+#     IN ADDITION TO the raw ASCII payload dump it always shows anyway -
+#     confirmed live: a real "GET /get?user=X&pass=Y" request got tagged
+#     TWICE (once from the decorated header line, once from the raw
+#     payload line matching the same text) - same real event, reported
+#     as two [CREDS FOUND] rows instead of one. Pre-existing in every
+#     version of this function (none of them were block-aware about
+#     which packet a match belongs to for dedup purposes, only this one
+#     even tracks blocks at all) - cosmetic (no wrong data, just a
+#     redundant repeat), not chased further here.
 run_creds_watcher() {
     local file="$1" last_creds=0 last_http=0 last_size=-1
     # is_running (PIDFILE-based) covers --background; for a foreground
@@ -432,29 +473,62 @@ run_creds_watcher() {
         cur_size=$(wc -c < "$file" 2>/dev/null)
         [ "$cur_size" = "$last_size" ] && continue
         last_size="$cur_size"
-        local dump creds_hits http_hits count new
-        dump=$(tcpdump -A -r "$file" 2>/dev/null)
-        [ -z "$dump" ] && continue
 
-        creds_hits=$(echo "$dump" | grep -iE "$CREDS_PATTERN")
-        if [ -n "$creds_hits" ]; then
-            count=$(echo "$creds_hits" | grep -c .)
-            if [ "$count" -gt "$last_creds" ]; then
-                new=$(echo "$creds_hits" | tail -n "+$((last_creds + 1))")
-                echo "$new" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN" | sed 's/^/[CREDS FOUND] /'
-                last_creds="$count"
+        local dumpf="/tmp/pager-sniff-watcher-dump.$$"
+        tcpdump -A -r "$file" 2>/dev/null > "$dumpf"
+        [ -s "$dumpf" ] || { rm -f "$dumpf"; continue; }
+
+        # BUG FOUND AND FIXED (live-caught while verifying this version):
+        # busybox grep, for a single line that matches MULTIPLE
+        # alternatives in a complex `-E` pattern (CREDS_PATTERN has many,
+        # joined by `|`), can report that SAME line more than once -
+        # confirmed live against a synthetic "user=admin&pass=hunter2"
+        # line (matches both the user= and pass= alternatives) printing
+        # twice with plain `grep -c .`-style counting. `sort -un` collapses
+        # that back to one entry per real line before counting/tagging -
+        # this bug already existed in this function's very first version
+        # too (same counting idiom), just never caught until this rewrite
+        # was verified line-by-line against real data.
+        local creds_lines http_lines creds_count http_count
+        creds_lines=$(grep -noiE "$CREDS_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
+        http_lines=$(grep -noiE "$HTTP_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
+        creds_count=$(echo -n "$creds_lines" | grep -c .)
+        http_count=$(echo -n "$http_lines" | grep -c .)
+
+        if [ "$creds_count" -gt "$last_creds" ] || [ "$http_count" -gt "$last_http" ]; then
+            # Only computed when there's actually something new to tag -
+            # this is the one remaining full-file-ish pass (a plain
+            # anchored line-number listing, not a content match), shared
+            # by both branches below via watcher_block_bounds().
+            local blocks_lines
+            blocks_lines=$(grep -noE '^[0-9]+:[0-9]+:[0-9]+\.' "$dumpf" | cut -d: -f1)
+
+            if [ "$creds_count" -gt "$last_creds" ]; then
+                echo "$creds_lines" | tail -n "+$((last_creds + 1))" | while IFS= read -r lineno; do
+                    [ -z "$lineno" ] && continue
+                    local ctx src host content
+                    ctx=$(watcher_tag_hit "$dumpf" "$lineno")
+                    src=$(cut -f1 <<<"$ctx"); host=$(cut -f2 <<<"$ctx")
+                    content=$(sed -n "${lineno}p" "$dumpf")
+                    printf '[CREDS FOUND] %s -> %s  ' "$src" "$host"
+                    echo "$content" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN"
+                done
+                last_creds="$creds_count"
+            fi
+
+            if [ "$http_count" -gt "$last_http" ]; then
+                echo "$http_lines" | tail -n "+$((last_http + 1))" | while IFS= read -r lineno; do
+                    [ -z "$lineno" ] && continue
+                    local ctx src host content
+                    ctx=$(watcher_tag_hit "$dumpf" "$lineno")
+                    src=$(cut -f1 <<<"$ctx"); host=$(cut -f2 <<<"$ctx")
+                    content=$(sed -n "${lineno}p" "$dumpf")
+                    echo "[HTTP] $src -> $host  $content"
+                done
+                last_http="$http_count"
             fi
         fi
-
-        http_hits=$(echo "$dump" | grep -iE "$HTTP_PATTERN")
-        if [ -n "$http_hits" ]; then
-            count=$(echo "$http_hits" | grep -c .)
-            if [ "$count" -gt "$last_http" ]; then
-                new=$(echo "$http_hits" | tail -n "+$((last_http + 1))")
-                echo "$new" | sed 's/^/[HTTP] /'
-                last_http="$count"
-            fi
-        fi
+        rm -f "$dumpf"
     done
 }
 

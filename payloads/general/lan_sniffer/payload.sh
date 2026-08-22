@@ -2,7 +2,7 @@
 # Title: LAN Sniffer
 # Author: florian
 # Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - full internet access stays intact) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
-# Version: 3.3
+# Version: 3.4
 #
 # This is a general-payload wrapper around sniff.sh's own capture pipeline
 # (nothing new re-implemented here). There was no dedicated Payloads-menu
@@ -18,33 +18,21 @@
 # its post-capture summary) finishes - looked exactly like a hang. v2.0
 # fixed that with a background capture + live-tailed log. v3.0 fixed three
 # more real reports (bridge/tap wording, an orphaned bridge on a cancelled
-# dialog, and a fixed-timer-only duration picker). v3.3 (this version)
-# fixes three more, all reported live against this exact device:
-#
-#   1. The bridge setup itself was still one big blocking command
-#      substitution - nothing printed inside it reached the screen until
-#      the WHOLE call returned, leaving one static line on screen the
-#      entire time ("it just stayed here"). Now runs in the background
-#      while this payload tails sniff.sh's own live bridge-progress file
-#      and renders a reset.sh-style [#####-----] progress bar as each real
-#      setup step lands.
-#   2. The --dhcp option (get SSH back on the tapped LAN without a reset
-#      afterward) is removed from this flow - its own client-side
-#      auto-renew mechanism was found unsafe and reverted (see
-#      README.md's postmortem), and without it the option had no visible
-#      payoff from here. sniff.sh --bridge --dhcp is still there directly
-#      if this gets revisited later.
-#   3. sniff.sh's own live watcher (run_creds_watcher) was tried with an
-#      "IP -> URL, like bettercap/Wireshark" tagging improvement, but a
-#      live timing test found the awk-based version 4x+ slower than a
-#      plain grep for the same pattern on this device - slow enough that
-#      it never produced a single live tag for a real capture. Reverted
-#      to the original, proven (if plain) version rather than ship a
-#      confirmed regression - see sniff.sh's own comment on
-#      run_creds_watcher for the measured numbers. The end-of-capture
-#      summary (`sniff.sh --summary`) is unaffected and does show source
-#      IPs and HTTP Host headers correctly - it only runs once, after the
-#      capture, so it was never under the same time pressure.
+# dialog, and a fixed-timer-only duration picker). v3.3 fixed the bridge
+# setup's own missing progress feedback and removed the --dhcp option from
+# this flow (see README.md's postmortem on why). v3.3 also tried an
+# "IP -> URL, like bettercap/Wireshark" tagging improvement for the live
+# watcher, but shipped it broken (an awk rewrite that measured 4x+ slower
+# than plain grep on this device, so it never actually produced a live
+# tag) and had to revert it the same day. v3.4 (this version) replaces
+# that revert with a real, verified-live fix: sniff.sh's run_creds_watcher
+# now tags live HTTP/creds hits with source IP and destination host,
+# built by keeping the expensive full-file scanning on grep (the fast
+# part) and only doing the per-hit IP/host lookup for the handful of
+# lines grep actually flags - see its own comment for the measured
+# numbers and the honest remaining limits (still not sub-5s "live" for a
+# genuinely busy capture; the same real event can occasionally get tagged
+# twice due to a tcpdump -A quirk).
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -53,12 +41,11 @@
 # stops, shows the summary, then asks whether to save the full log.
 #
 # "Wireshark-like" live content: sniff.sh's own live watcher (see its
-# run_creds_watcher) surfaces HTTP requests/Host headers (tagged [HTTP])
-# and credential hits (tagged [CREDS FOUND], matched text highlighted red
-# over SSH) AS THEY'RE SEEN, into the same live-scrolling log this
-# payload tails - not just in the end-of-capture summary. These are raw
-# lines (no source-IP/host pairing live - see the note above); the full
-# summary at the end of a capture pairs them with source IPs and hosts.
+# run_creds_watcher) surfaces HTTP requests (tagged [HTTP], as
+# "SRC -> HOST  request text") and credential hits (tagged [CREDS FOUND],
+# matched text highlighted red over SSH) AS THEY'RE SEEN, into the same
+# live-scrolling log this payload tails - not just in the end-of-capture
+# summary.
 #
 # HONEST LIMITATION: `WAIT_FOR_INPUT`/`WAIT_FOR_BUTTON_PRESS` are the only
 # documented ways to react to a button press, and both BLOCK until
