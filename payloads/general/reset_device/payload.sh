@@ -107,4 +107,16 @@ wait "$__reset_pid"
 sleep 1.2
 kill "$__tail_pid" 2>/dev/null
 
-ALERT "Reset complete - see log"
+# BIG CHANGE: this used to show "Reset complete" unconditionally - reset.sh
+# itself always exits 0 from its normal flow even when one of its own
+# sub-steps failed (reset_wifi/reset_bluetooth/reset_processes each just
+# log an ERROR: line and continue with the rest of the reset, they don't
+# abort the whole script - see reset.sh's own recent fix for exactly this
+# honest-reporting behavior). Checking the wait() exit code alone wouldn't
+# catch that; grepping the captured log for the ERROR: lines those
+# functions now actually produce does.
+if grep -q "ERROR:" "$LOG_FILE" 2>/dev/null; then
+    ALERT "Reset finished with errors - see log for details"
+else
+    ALERT "Reset complete - see log"
+fi

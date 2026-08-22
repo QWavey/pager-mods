@@ -190,8 +190,20 @@ elif have_recon_db; then
     __target="FF:FF:FF:FF:FF:FF"
 
 else
+    # BIG CHANGE (found via code review): this branch is reached whenever
+    # recon.db is simply missing - even if the Pager IS currently connected
+    # to WiFi as a client. It never checked that though, so a connected-but-
+    # no-recon-db run always asked for the BSSID fully blank, despite
+    # connected_bssid() (already defined above, already used by the
+    # connected+recon.db branch) being able to answer that directly. Now
+    # prefills it the same way that branch does when it can.
     LOG "No recon selection and no recon database found - asking manually."
-    __bssid=$(MAC_PICKER "AP BSSID" "${_RECON_SELECTED_AP_BSSID:-}") || exit 0
+    __prefill_bssid="${_RECON_SELECTED_AP_BSSID:-}"
+    if [ -z "$__prefill_bssid" ] && is_wifi_connected; then
+        __prefill_bssid=$(connected_bssid)
+        [ -n "$__prefill_bssid" ] && LOG "Connected to $__prefill_bssid - prefilling it below."
+    fi
+    __bssid=$(MAC_PICKER "AP BSSID" "$__prefill_bssid") || exit 0
     __target=$(MAC_PICKER "Target client (FF:FF:FF:FF:FF:FF for all)" "FF:FF:FF:FF:FF:FF") || exit 0
     __channel=$(NUMBER_PICKER "Channel" "6") || exit 0
 fi

@@ -139,13 +139,33 @@ payloads/, then the two installer scripts.
     call to Wigle.net); interactive choice 4 (Stop log) was missing both
     the timeout and any feedback, unlike every other choice in the same
     menu
-47. [ ] payloads/general/bluetooth_jam/payload.sh
-48. [ ] payloads/general/custom_lan_scan/payload.sh
-49. [ ] payloads/general/lan_sniffer/payload.sh
-50. [ ] payloads/general/packet_tracer/payload.sh
-51. [ ] payloads/general/pc_link_recon/payload.sh
-52. [ ] payloads/general/reset_device/payload.sh
-53. [ ] payloads/general/wifi_deauth/payload.sh
+47. [x] payloads/general/bluetooth_jam/payload.sh - fixed a real gap in 4 of
+    5 background-launched actions (flood/jam/disrupt/disrupt-focus): none
+    checked whether the --background launch actually survived before
+    claiming "running - press B to stop", unlike Adv-spam (already fixed)
+    and unlike this exact class already fixed in wifi_deauth/payload.sh
+48. [x] payloads/general/custom_lan_scan/payload.sh (verdict: left as-is -
+    already v2.0, already checks LanScan.sh's real exit code)
+49. [x] payloads/general/lan_sniffer/payload.sh (verdict: left as-is -
+    already v3.1, exceptionally hardened from earlier this session; the
+    one payload most directly tied to this session's core LAN-bridge
+    incident, deliberately not touched further without a genuinely new,
+    safe insight)
+50. [x] payloads/general/packet_tracer/payload.sh - real gap fixed: this
+    payload's own name/description promise a "live... watch traffic as it
+    happens" trace, but it actually blocked completely blind until B was
+    pressed - ported lan_sniffer's already-proven live-scroll (bounded
+    poll, A-pause/B-stop) mechanism instead of reinventing it
+51. [x] payloads/general/pc_link_recon/payload.sh (verdict: left as-is -
+    already v2.0, already checks pc_link.sh's real exit code)
+52. [x] payloads/general/reset_device/payload.sh - now greps the captured
+    log for ERROR: lines (which reset.sh's own fix earlier in this sweep
+    actually produces now) instead of always showing "Reset complete" -
+    reset.sh's own sub-steps log an error and continue rather than
+    aborting, so the wait() exit code alone would never have caught this
+53. [x] payloads/general/wifi_deauth/payload.sh - fixed the minor
+    completeness gap flagged earlier this session: connected-but-no-
+    recon.db no longer skips prefilling the BSSID via connected_bssid()
 54. [ ] setup.py
 55. [ ] sync.py
 

@@ -98,8 +98,65 @@ if [ "${__rc:-0}" -ne 0 ]; then
     exit 1
 fi
 
-ALERT "Tracing - press B to stop"
-WAIT_FOR_BUTTON_PRESS B
+# BIG CHANGE: this payload's own title/description promise a
+# "Wireshark-style LIVE packet trace... you watch traffic go by AS IT
+# HAPPENS" - but until now it just showed one static "Tracing - press B to
+# stop" message and blocked, completely blind, until you pressed B. That's
+# the opposite of live - it was actually the ONE capture-type payload in
+# this toolkit with no live view at all, despite promising exactly that in
+# its own name. lan_sniffer/payload.sh already solved this exact problem
+# (poll the log's line count, LOG only the genuinely new lines each
+# second, no `tail -f` - avoiding the orphaned-process bug class that
+# approach caused there before it was fixed) - same proven mechanism
+# ported here instead of reinventing it, plus the same A-pause/B-stop
+# button behavior for consistency with that payload.
+SCROLLER_PID=""
+start_scroll() {
+    (
+        local __last=0 __total
+        while :; do
+            __total=$(wc -l < /tmp/pager-tracer.log 2>/dev/null || echo 0)
+            if [ "$__total" -gt "$__last" ] 2>/dev/null; then
+                tail -n "+$((__last + 1))" /tmp/pager-tracer.log 2>/dev/null | while IFS= read -r __line; do LOG "$__line"; done
+                __last="$__total"
+            fi
+            sleep 1
+        done
+    ) &
+    SCROLLER_PID=$!
+}
+stop_scroll() {
+    [ -n "$SCROLLER_PID" ] && kill "$SCROLLER_PID" 2>/dev/null
+    SCROLLER_PID=""
+}
+
+LOG "Live trace running - A: pause/resume view, B: stop."
+start_scroll
+__paused=0
+while true; do
+    __btn=$(WAIT_FOR_INPUT)
+    case "$__btn" in
+        A)
+            if [ "$__paused" = "0" ]; then
+                stop_scroll
+                LOG "-- Paused. Scroll up to review. Press A to resume, B to stop. --"
+                __paused=1
+            else
+                LOG "-- Resuming live view --"
+                start_scroll
+                __paused=0
+            fi
+            ;;
+        B)
+            if CONFIRMATION_DIALOG "Stop tracing and exit?"; then
+                stop_scroll
+                break
+            else
+                LOG "-- Continuing. Press B again when ready to stop. --"
+            fi
+            ;;
+    esac
+done
 
 /root/scripts/tracer.sh --stop
 

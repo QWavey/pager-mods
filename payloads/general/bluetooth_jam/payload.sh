@@ -67,7 +67,18 @@ case "$__action" in
             exit 0
         fi
         LOG "Flooding $__mac - press B to stop."
-        /root/scripts/bluetooth.sh --flood "$__mac" -y --background
+        # BUG FOUND AND FIXED (found via code review - same class already
+        # fixed for "Adv-spam area" below and in wifi_deauth/payload.sh):
+        # this used to show "running - press B to stop" unconditionally
+        # right after launching --background, with no check the launch
+        # actually survived. bluetooth.sh's own --background path already
+        # verifies liveness internally and exits non-zero if it didn't
+        # start (bad MAC format aside, already checked above) - just
+        # propagate that instead of assuming success.
+        if ! /root/scripts/bluetooth.sh --flood "$__mac" -y --background; then
+            ERROR_DIALOG "Flood did not start - see log and try again."
+            exit 1
+        fi
         ALERT "Bluetooth flood running - press B to stop"
         WAIT_FOR_BUTTON_PRESS B
         /root/scripts/bluetooth.sh --stop
@@ -86,7 +97,11 @@ case "$__action" in
             exit 0
         fi
         LOG "Scanning (classic + BLE), then jamming every device found - press B to stop."
-        /root/scripts/bluetooth.sh --jam-area -y --background
+        # BUG FOUND AND FIXED (same class as "Flood a target" above).
+        if ! /root/scripts/bluetooth.sh --jam-area -y --background; then
+            ERROR_DIALOG "Area jam did not start - see log and try again."
+            exit 1
+        fi
         ALERT "Area jam running - press B to stop"
         WAIT_FOR_BUTTON_PRESS B
         /root/scripts/bluetooth.sh --stop
@@ -136,7 +151,11 @@ case "$__action" in
             exit 0
         fi
         LOG "Occupying all 40 BLE channels in rotation - press B to stop."
-        /root/scripts/bluetooth.sh --disrupt --background -y
+        # BUG FOUND AND FIXED (same class as "Flood a target" above).
+        if ! /root/scripts/bluetooth.sh --disrupt --background -y; then
+            ERROR_DIALOG "Disrupt did not start - see log and try again."
+            exit 1
+        fi
         ALERT "Disrupt running - press B to stop"
         WAIT_FOR_BUTTON_PRESS B
         /root/scripts/bluetooth.sh --stop
@@ -150,7 +169,11 @@ case "$__action" in
             exit 0
         fi
         LOG "Occupying BLE advertising channels 37/38/39 only - press B to stop."
-        /root/scripts/bluetooth.sh --disrupt --focus --background -y
+        # BUG FOUND AND FIXED (same class as "Flood a target" above).
+        if ! /root/scripts/bluetooth.sh --disrupt --focus --background -y; then
+            ERROR_DIALOG "Disrupt (focus) did not start - see log and try again."
+            exit 1
+        fi
         ALERT "Disrupt (focus) running - press B to stop"
         WAIT_FOR_BUTTON_PRESS B
         /root/scripts/bluetooth.sh --stop
