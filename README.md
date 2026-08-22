@@ -88,6 +88,32 @@ attempts regardless of network type. `deauth.sh --burst N` raises
 disruption pressure within that ceiling; nothing raises it past the
 ceiling itself.
 
+**Don't flap `eth0`'s link state to force a tethered client's DHCP
+renewal - it isn't a plain PHY.** `sniff.sh --bridge eth0 eth1 --dhcp`
+lets the Pager keep SSH reachable while sniffing by pulling a real DHCP
+lease on the bridge itself, but the tethered PC's own NIC never sees a
+link-state change (the USB-C cable stays plugged in throughout), so its
+OS may not proactively renew and can be left looking like "no internet"
+even though the bridge and the Pager's own lease both work. A fix that
+briefly set `eth0 down` then `up` right after the bridge came up (to
+mimic a cable unplug/replug and trigger the client's own renewal) was
+tried and live-tested - it made things *worse*, dropping the tethered PC
+and requiring a full physical reset of the device, worse than any
+previous failure in that same development pass. Root cause: `eth0` on
+this hardware is documented (see `detect_usb_c` in `scripts/sniff.sh`) as
+the SoC's own USB-Ethernet **gadget controller**, not a plain Ethernet
+PHY - toggling it isn't guaranteed to be a quick carrier blip the way it
+would be on a real NIC; it can tie into the USB gadget function's
+bind/unbind state, which the host can see as a full device
+detach/re-enumeration rather than "cable unplugged," and that takes far
+longer to recover than a 1-second sleep budgeted for. Reverted; the
+known limitation is now just documented in `sniff.sh`'s own output
+(manual `ipconfig /release`+`/renew` on Windows, `dhclient -r`+`dhclient`
+on Linux, on the client). If this is revisited, do it with a WiFi-based
+second SSH session already open (`scripts/mgmt.sh` to enable the
+Management AP) as a safety net **before** touching `eth0` again, not
+live on the same connection being disrupted.
+
 ## Structure
 
 - `scripts/` - the real tools (deauth, bluetooth, sniff, tracer, recon
