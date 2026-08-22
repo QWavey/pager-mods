@@ -51,6 +51,13 @@ ARGS="$IFACE"
 [ "$B5" = "1" ] && ARGS="$ARGS 5"
 [ "$B6" = "1" ] && ARGS="$ARGS 6"
 
+# BUG FOUND AND FIXED (found via code review, same class already fixed in
+# dns.sh/dnsspoof.sh/gps.sh/mgmt.sh/openap.sh/pcap.sh/reconsession.sh/
+# ssidpool.sh/screen.sh/vpn.sh/wigle.sh/report.sh - this file was missed):
+# PINEAPPLE_SET_BANDS's real exit code was never checked at all - "Bands
+# set" printed unconditionally even if the underlying command failed,
+# which would be a particularly quiet failure here since a bad --iface
+# means recon silently keeps hopping on whatever bands it was already set
+# to, with no indication the requested change didn't take.
 # shellcheck disable=SC2086
-PINEAPPLE_SET_BANDS $ARGS
-say "Bands set on $IFACE."
+PINEAPPLE_SET_BANDS $ARGS && say "Bands set on $IFACE." || die "Failed to set bands on $IFACE - check the interface name (e.g. wlan1mon)."
