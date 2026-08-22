@@ -271,6 +271,21 @@ choice=$(ask "Pick a payload number (or 0 to cancel)" "0")
 case "$choice" in
     ''|*[!0-9]*) die "Invalid selection." ;;
 esac
+# BUG FOUND AND FIXED (bug-hunt pass, verified with a standalone `bash -c`
+# repro): passing the digit-only check above doesn't make $choice a SAFE
+# array subscript - ${PATHS[$choice]} evaluates $choice arithmetically, and
+# bash arithmetic treats a leading zero as OCTAL. Typing "08" or "09"
+# (invalid octal digits) crashed the entire script outright with a raw
+# "value too great for base" error instead of the intended clean "Invalid
+# selection." - confirmed live in isolation: the script aborts immediately,
+# no further lines execute, `$?` comes back 1 with no clean message at all.
+# Worse, a leading zero using only 0-7 digits doesn't even error - it
+# silently reinterprets: typing "011" resolved to octal 11 = decimal 9, so
+# ${PATHS[011]} returned PAYLOAD #9, not #11 - a typo'd leading zero could
+# silently launch the WRONG payload with zero warning. Forcing base-10
+# interpretation up front (bash's `10#$choice` prefix) neutralizes the
+# octal reinterpretation before it ever reaches an array subscript.
+choice=$((10#$choice))
 [ -z "${PATHS[$choice]:-}" ] && die "Invalid selection."
 
 if confirm "Run this in the background instead of the foreground?"; then

@@ -21,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 usage() { print_help "$0"; exit 1; }
 
 PIDFILE="/tmp/pager-webui.pid"
+PORTFILE="/tmp/pager-webui.port"
 PORT=8081
 DO_START=0; DO_STOP=0; DO_STATUS=0; DO_TOKEN=0; TOKEN=""
 
@@ -46,6 +47,20 @@ done
 # argv), not "webui.sh" at all.
 is_running() { pid_running "$PIDFILE" "server.py"; }
 
+# TINY BUG FOUND AND FIXED: --status and interactive mode both printed the
+# *local* $PORT variable (the --port argument of THIS invocation, default
+# 8081) as if it were the port the already-running server is actually
+# listening on. Those are two different things - the running instance's
+# port was never persisted anywhere, so e.g. `webui.sh --start --port 9090`
+# followed later by a plain `webui.sh --status` (no --port) finds it
+# running via the PIDFILE just fine but reports "on http://172.16.52.1:8081"
+# - the wrong port entirely, pointing the user at a URL nothing is
+# listening on. Persisting the actual started port next to the PIDFILE and
+# reading it back for display (falling back to the local $PORT only if the
+# port file is missing, e.g. a leftover instance from before this fix)
+# makes the reported port match what was really started.
+running_port() { cat "$PORTFILE" 2>/dev/null || echo "$PORT"; }
+
 if [ "$DO_TOKEN" = "1" ]; then
     if [ -z "$TOKEN" ]; then
         TOKEN=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-')
@@ -58,7 +73,7 @@ fi
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
-        say "Running (PID $(cat "$PIDFILE")) on http://172.16.52.1:$PORT"
+        say "Running (PID $(cat "$PIDFILE")) on http://172.16.52.1:$(running_port)"
     else
         say "Not running."
     fi
@@ -68,7 +83,7 @@ fi
 if [ "$DO_STOP" = "1" ]; then
     if is_running; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE" "$PORTFILE"
         say "Stopped."
     else
         say "Not running."
@@ -82,13 +97,13 @@ INTERACTIVE=0
 if [ "$INTERACTIVE" = "1" ]; then
     echo "== webui.sh =="
     if is_running; then
-        say "Currently running on port $PORT."
+        say "Currently running on port $(running_port)."
         confirm "Stop it?" && DO_STOP=1
     else
         confirm "Start the control panel now?" && DO_START=1
     fi
     if [ "$DO_STOP" = "1" ]; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; say "Stopped."
+        kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE" "$PORTFILE"; say "Stopped."
         exit 0
     fi
 fi
@@ -106,11 +121,13 @@ if [ "$DO_START" = "1" ]; then
     # shellcheck disable=SC2086
     ( trap '' HUP; exec $PY "$SCRIPT_DIR/guiserver/server.py" "$PORT" ) >/tmp/pager-webui.log 2>&1 &
     echo $! > "$PIDFILE"
+    echo "$PORT" > "$PORTFILE"
     sleep 1
     if is_running; then
-        say "Started (PID $(cat "$PIDFILE")) on http://172.16.52.1:$PORT"
+        say "Started (PID $(cat "$PIDFILE")) on http://172.16.52.1:$(running_port)"
         say "Open it from a device on Management WiFi or USB-C, with your token."
     else
+        rm -f "$PORTFILE"
         die "Failed to start - check /tmp/pager-webui.log"
     fi
 fi

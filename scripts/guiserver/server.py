@@ -27,6 +27,7 @@ import os
 import secrets
 import subprocess
 import sys
+import threading
 import urllib.parse
 
 SCRIPTS_DIR = "/root/scripts"
@@ -94,14 +95,36 @@ def cfg_get(key):
 # .poll() (a plain non-blocking waitpid(WNOHANG) for that specific PID)
 # avoids the SIGCHLD-wide side effect entirely.
 _background_procs = []
+# BUG FOUND AND FIXED: _background_procs was mutated from multiple request
+# threads with no lock at all - ThreadingHTTPServer runs every request
+# (each do_GET/do_POST call) on its own thread, and _reap_background_procs()
+# runs unconditionally at the top of EVERY GET (do_GET calls it before
+# anything else), which the frontend hits every 1.5s while a live tail is
+# active (see app.js's startTailing poll). Traced the actual race: thread A
+# (a GET, e.g. a /api/tail poll) is midway through _reap_background_procs()
+# - it has already read the old list into `still_running` - while thread B
+# (a POST /api/run with background=true, e.g. starting a second attack)
+# concurrently appends its new Popen to _background_procs. Thread A then
+# finishes with `_background_procs[:] = still_running`, which REPLACES the
+# list's contents wholesale and silently erases the entry thread B just
+# appended, since `still_running` was computed before that append happened.
+# Verified the mechanism in isolation (no server.py/device involved):
+#   _background_procs = [1, 2]
+#   still = list(_background_procs)      # thread A starts reaping: [1, 2]
+#   _background_procs.append(3)          # thread B appends concurrently
+#   _background_procs[:] = still         # thread A finishes -> [1, 2], "3" lost
+# The dropped process is never reaped again (nothing else references it) -
+# reintroducing the exact zombie-process leak the surrounding comment says
+# this tracking was added to avoid, and doing so under perfectly ordinary
+# concurrent use (launching one background action while another's tail is
+# being polled). A lock around every read-modify-write of this list closes
+# the window.
+_background_procs_lock = threading.Lock()
 
 
 def _reap_background_procs():
-    still_running = []
-    for p in _background_procs:
-        if p.poll() is None:
-            still_running.append(p)
-    _background_procs[:] = still_running
+    with _background_procs_lock:
+        _background_procs[:] = [p for p in _background_procs if p.poll() is None]
 
 
 def run_script(name, args, timeout=60, background=False):
@@ -114,7 +137,8 @@ def run_script(name, args, timeout=60, background=False):
     if background:
         _reap_background_procs()
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        _background_procs.append(proc)
+        with _background_procs_lock:
+            _background_procs.append(proc)
         return {"rc": 0, "stdout": "started in background", "stderr": ""}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

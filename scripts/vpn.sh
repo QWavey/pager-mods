@@ -95,7 +95,26 @@ case "$KIND" in
     "")
         echo "== vpn.sh =="
         k=$(ask "VPN type (openvpn/wireguard/status)" "wireguard")
-        if [ "$k" = "status" ]; then do_status; exit 0; fi
+        # BUG FOUND AND FIXED (found via code review, confirmed with an
+        # isolated repro): every branch below that dispatches on $k used
+        # `if [ "$k" = "openvpn" ]; then run_openvpn; else run_wireguard;
+        # fi` - so a typo'd/unrecognized VPN type (e.g. "opnvpn") was never
+        # rejected, it silently fell into the `else` and got treated as
+        # wireguard. Reproduced standalone: with k="opnvpn" that exact
+        # if/else prints "ROUTED: wireguard". For a VPN wrapper this is
+        # worse than cosmetic - a user asking to (re)configure openvpn with
+        # a typo would have wireguard silently (re)configured instead,
+        # while believing openvpn was acted on. The CLI path (`case "$KIND"
+        # in openvpn|wireguard|*) die ...`) and filters.sh's own run_filter
+        # already validate their type argument explicitly with a die-on-
+        # unknown default - this brings the interactive block in line with
+        # that same established pattern instead of the old silent-wrong-
+        # fallback behavior.
+        case "$k" in
+            status) do_status; exit 0 ;;
+            openvpn|wireguard) : ;;
+            *) die "Unknown VPN type '$k' (expected openvpn, wireguard, or status)" ;;
+        esac
         a=$(ask "Action (--enable/--disable)" "--disable")
         KIND="$k"; ACTION="$a"
         if [ "$a" = "--enable" ]; then

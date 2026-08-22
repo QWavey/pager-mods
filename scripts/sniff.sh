@@ -202,6 +202,28 @@ done
 [ -n "$DURATION" ] && case "$DURATION" in *[!0-9]*) die "'--duration' needs a whole number of seconds (got '$DURATION')." ;; esac
 [ -n "$COUNT" ] && case "$COUNT" in *[!0-9]*) die "'--count' needs a whole number of packets (got '$COUNT')." ;; esac
 
+# BUG FOUND AND FIXED (edge case, verified locally - not a re-litigation of
+# the digit check above, a separate gap in it): "0" itself sailed straight
+# through that check as "a valid whole number" for both flags, but isn't
+# harmless the way a user would assume - it doesn't mean "capture nothing"/
+# "stop immediately", it means the OPPOSITE. Verified locally:
+# `time timeout 0 sleep 3` (GNU coreutils, same tool/semantics this script
+# wraps via `timeout "$DURATION" tcpdump ...`) took the full 3 seconds, not
+# 0 - confirming the documented behavior that a duration of 0 disables the
+# timeout entirely rather than firing it instantly. `tcpdump -c 0` behaves
+# the same way for --count: libpcap's own pcap_loop(3) documents "a value
+# of -1 or 0 for cnt is equivalent to infinity". So `--duration 0` or
+# `--count 0` would each silently launch an UNBOUNDED capture instead of
+# the "stop immediately"/"capture nothing" a user typing 0 would reasonably
+# expect - reachable not just from a CLI typo but from the LAN Sniffer
+# payload's own NUMBER_PICKER (pick_duration() there has no lower-bound
+# check either) feeding straight into --duration. Dangerous specifically
+# for a --background run on this disk/RAM-constrained device, with no
+# other backstop to ever end it. Reject it explicitly, same clear-error
+# convention as every other bad value here.
+[ "$DURATION" = "0" ] && die "'--duration' can't be 0 - tcpdump/timeout treat 0 as 'no limit', not 'stop immediately', so this would start an unbounded capture instead. Use a real duration (e.g. 1) or --count 1 if you just want a single packet."
+[ "$COUNT" = "0" ] && die "'--count' can't be 0 - tcpdump treats a count of 0 as 'unlimited', not 'capture nothing', so this would start an unbounded capture instead. Use a real packet count."
+
 # Shared by summarize_pcap (end-of-capture scan) AND run_creds_watcher
 # (live, DURING-capture scan) - one definition so the two can't drift.
 # Covers HTTP Basic Auth, query-string logins, raw FTP/Telnet USER/PASS,
@@ -389,9 +411,33 @@ watcher_tag_hit() {
     local dumpfile="$1" lineno="$2" bounds bs be src host
     bounds=$(watcher_block_bounds "$lineno")
     bs=$(cut -f1 <<<"$bounds"); be=$(cut -f2 <<<"$bounds")
+    # BUG FOUND AND FIXED (verified with a standalone awk test): this used
+    # an unconditional `sub(/\.[0-9]+$/, "", s)` to strip a trailing port
+    # from the source address - the EXACT pattern summarize_pcap's own
+    # "Top source IPs" section already found-and-fixed above (see its own
+    # comment) because it wrongly treats a real ICMP address's last OCTET
+    # as if it were a port and strips it too. That fix was never carried
+    # over to this second, separate call site - confirmed live via a
+    # standalone test: `172.16.52.1 > 172.16.52.254: ICMP echo request`
+    # (no port at all, 4 dot-separated numbers) was reported here as
+    # "172.16.52" (3 octets, wrong), the identical failure mode. Reachable
+    # in practice, not just theoretically: an ICMP error packet (dest
+    # unreachable/TTL exceeded) embeds a portion of the ORIGINAL packet
+    # that triggered it, including its payload - so a [CREDS FOUND]/[HTTP]
+    # live tag can legitimately resolve to an ICMP packet's own header
+    # line. Same conditional fix as summarize_pcap's (only strip a
+    # trailing number when what's left is a genuine 4-octet IPv4 address,
+    # or a colon-containing IPv6 address with its own trailing port) -
+    # verified against all three cases (ICMP, TCP+port, IPv6+port) with a
+    # standalone awk test before applying here.
     src=$(sed -n "${bs}p" "$dumpfile" | awk '{
         for (i = 1; i <= NF; i++) {
-            if ($i == ">") { s = $(i - 1); sub(/\.[0-9]+$/, "", s); print s; exit }
+            if ($i == ">") {
+                s = $(i - 1)
+                if (s ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) sub(/\.[0-9]+$/, "", s)
+                else if (s ~ /:/ && s ~ /\.[0-9]+$/) sub(/\.[0-9]+$/, "", s)
+                print s; exit
+            }
         }
     }')
     [ -z "$src" ] && src="?"
@@ -1312,8 +1358,34 @@ for _pid in $(ps 2>/dev/null | grep -E 'tcpdump .* -r ' | grep -v grep | awk '{p
     kill "$_pid" 2>/dev/null
 done
 
-say "Done. Saved to $OUTPUT"
+# BUG FOUND AND FIXED (CRITICAL - silent failure, verified with a standalone
+# repro): run_capture's own exit status was never checked, and "Done. Saved
+# to $OUTPUT" printed unconditionally right after it regardless of whether
+# tcpdump ever actually captured anything - a bad --filter (invalid BPF
+# syntax), the interface disappearing between the earlier check and launch,
+# or a custom --output pointing at a directory that doesn't exist, all make
+# tcpdump exit immediately without ever creating $OUTPUT, yet the script
+# still claimed success. summarize_pcap's own `[ ! -s "$file" ]` guard
+# happens to catch this and print an error - but ONLY when --no-summary is
+# NOT given; with --no-summary (a documented, supported flag) there is
+# nothing else downstream to catch it at all, so the ONLY output for a
+# completely failed capture would be "Done. Saved to $OUTPUT" followed by
+# "Full capture: tcpdump -r $OUTPUT..." - a clean, confident-looking success
+# report for a capture that never happened. Reproduced standalone: a stub
+# run_capture() that fails immediately, with NO_SUMMARY=1, printed exactly
+# that misleading "Done. Saved"/"Full capture" pair with zero indication of
+# failure. Now checks the same `-s` (exists and non-empty) signal
+# summarize_pcap already uses - a genuinely successful capture always has at
+# least tcpdump's own global pcap header written (nonzero size) even with
+# zero packets caught, so this doesn't false-positive on a real "quiet
+# network, nothing captured" run, only on tcpdump never getting the file
+# open at all.
+if [ -s "$OUTPUT" ]; then
+    say "Done. Saved to $OUTPUT"
+else
+    err "Capture produced no output at $OUTPUT - tcpdump likely never started (bad --filter syntax, '$IFACE' disappearing, or the --output directory not existing/writable). Nothing was captured."
+fi
 if [ "$NO_SUMMARY" != "1" ]; then
     summarize_pcap "$OUTPUT"
 fi
-say "Full capture: tcpdump -r $OUTPUT   or download it and open in Wireshark."
+[ -s "$OUTPUT" ] && say "Full capture: tcpdump -r $OUTPUT   or download it and open in Wireshark."

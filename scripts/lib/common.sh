@@ -331,14 +331,38 @@ iface_has_carrier() {
 # `ip addr show wlan0cli` errors "can't find device"). Shared by deauth.sh
 # (--pick) and tracer.sh (--wifi) - was duplicated in deauth.sh until this
 # was pulled out here.
-is_wifi_connected() { ip -4 addr show wlan0cli 2>/dev/null | grep -q "inet "; }
+#
+# BUG FOUND AND FIXED (bug-hunt pass): this called plain `ip -4 addr show`
+# with no timeout, unlike every other netlink-touching call in this exact
+# file - ip_link() above exists specifically because this device has a
+# documented, live-reproduced history of a plain `ip` call wedging
+# indefinitely on a confused netlink socket right after a topology change
+# (see ip_link()'s own comment for the incident), and sniff.sh's `ip addr
+# flush` calls already route through the shared IP_LINK_TIMEOUT for the
+# same reason. `ip addr show` talks to the exact same rtnetlink socket
+# family as `ip link` - nothing about it is immune to that same wedge - yet
+# it was the one call site in this file still unguarded. Real blast radius:
+# is_wifi_connected() gates wifi.sh's --off/status logic and tracer.sh's
+# --wifi mode, and is called directly by deauth.sh --pick, none of which
+# wrap it in a timeout of their own - a wedged call here would hang each of
+# those indefinitely with no recovery. Reused the same IP_LINK_TIMEOUT
+# tunable ip_link() already uses (PAGER_IP_LINK_TIMEOUT) rather than adding
+# a second knob for what's the same underlying risk.
+is_wifi_connected() { timeout "$IP_LINK_TIMEOUT" ip -4 addr show wlan0cli 2>/dev/null | grep -q "inet "; }
 
 # connected_bssid - BSSID the client interface is currently associated to,
 # via the standard `iw` tool (not Hak5-specific, but present on this device
 # and the normal way to ask a wireless interface who it's associated to).
+#
+# BUG FOUND AND FIXED (bug-hunt pass): same gap as is_wifi_connected() right
+# above - `iw dev ... link` talks to the kernel over a netlink (nl80211)
+# socket exactly like `ip link`/`ip addr` do, so it's exposed to the same
+# documented wedge-after-a-topology-change failure mode this file already
+# guards every other netlink call against; this was the other unguarded
+# call site. Bounded the same way for the same reason.
 connected_bssid() {
     command -v iw >/dev/null 2>&1 || return 1
-    iw dev wlan0cli link 2>/dev/null | awk '/Connected to/ {print $3; exit}'
+    timeout "$IP_LINK_TIMEOUT" iw dev wlan0cli link 2>/dev/null | awk '/Connected to/ {print $3; exit}'
 }
 
 # detect_usb_a_iface - whatever external USB Ethernet adapter (e.g. a

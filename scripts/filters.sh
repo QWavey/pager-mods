@@ -6,12 +6,12 @@
 #   filters.sh device mode allow|deny
 #   filters.sh device add allow|deny AA:BB:CC:DD:EE:FF [MAC2 ...]
 #   filters.sh device delete allow|deny AA:BB:CC:DD:EE:FF [MAC2 ...]
-#   filters.sh device clear allow|deny
+#   filters.sh device clear allow|deny [-y]
 #   filters.sh device list allow|deny
 #   filters.sh network mode allow|deny
 #   filters.sh network add allow|deny "SSID" ["SSID2" ...]
 #   filters.sh network delete allow|deny "SSID" ["SSID2" ...]
-#   filters.sh network clear allow|deny
+#   filters.sh network clear allow|deny [-y]
 #   filters.sh network list allow|deny
 #   filters.sh                interactive mode
 #
@@ -25,6 +25,27 @@ TOOL_NAME="filters.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review, same class as dnsspoof.sh/
+# autossh.sh/ssidpool.sh): those three siblings all had a destructive
+# clear/--clear action gated behind confirm() but no -y/--yes flag to ever
+# bypass it non-interactively. This file's own "clear" action is just as
+# destructive (wipes an entire device/network allow or deny list) but,
+# before this fix, had no confirm() gate AT ALL - not merely lacking a
+# bypass, but a single mistyped `filters.sh device clear allow` wiped the
+# list immediately with zero chance to abort, unlike every other
+# destructive action in this toolkit. Brought in line with those siblings:
+# confirm() gate added below (in run_filter's "clear" case), and the same
+# -y/--yes filtered OUT of "$@" entirely (not just detected) so it can
+# never accidentally land as a positional TYPE/ACTION/list-name argument.
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
 
 TYPE="${1:-}"
 ACTION="${2:-}"
@@ -80,11 +101,38 @@ run_filter() {
         *) die "Unknown filter type '$TYPE' (expected device or network)" ;;
     esac
     cmd_prefix="PINEAPPLE_${type_upper}_FILTER"
+    # BUG FOUND AND FIXED (found via code review, confirmed with an
+    # isolated repro): mode/add/delete/clear all called with_mimic_paused
+    # and then did NOTHING with its exit code - not even the "unconditional
+    # success message" bug already fixed elsewhere in this codebase, just
+    # total silence either way. Reproduced standalone: a failing stand-in
+    # for PINEAPPLE_DEVICE_FILTER_ADD run through the same
+    # with_mimic_paused wrapper returned exit code 1 with zero output -
+    # nothing telling the user it failed, nothing telling them it worked.
+    # For filters that gate which devices/networks PineAP treats as
+    # trusted, a filter change that silently fails to apply is a real
+    # "user believes they're protected when they're not" gap, the same
+    # class already fixed via "&& say ... || die ..." in every sibling
+    # script (dns.sh/dnsspoof.sh/vpn.sh/autossh.sh/ssidpool.sh) - this had
+    # been missed here despite this file's own header claiming that class
+    # of bug was already handled throughout.
     case "$ACTION" in
-        mode) need_list "$@"; with_mimic_paused "${cmd_prefix}_MODE" "$1" ;;
-        add) [ "$#" -ge 2 ] || die "'add' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE add allow ..."; with_mimic_paused "${cmd_prefix}_ADD" "$@" ;;
-        delete) [ "$#" -ge 2 ] || die "'delete' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE delete allow ..."; with_mimic_paused "${cmd_prefix}_DELETE" "$@" ;;
-        clear) need_list "$@"; with_mimic_paused "${cmd_prefix}_CLEAR" "$1" ;;
+        mode)
+            need_list "$@"
+            with_mimic_paused "${cmd_prefix}_MODE" "$1" && say "$TYPE filter mode set to $1." || die "Failed to set $TYPE filter mode to '$1'."
+            ;;
+        add)
+            [ "$#" -ge 2 ] || die "'add' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE add allow ..."
+            with_mimic_paused "${cmd_prefix}_ADD" "$@" && say "Added to $TYPE $1 list." || die "Failed to add to $TYPE $1 list ($noun(s): ${*:2})."
+            ;;
+        delete)
+            [ "$#" -ge 2 ] || die "'delete' needs a list name (allow/deny) and at least one $noun, e.g. filters.sh $TYPE delete allow ..."
+            with_mimic_paused "${cmd_prefix}_DELETE" "$@" && say "Removed from $TYPE $1 list." || die "Failed to remove from $TYPE $1 list ($noun(s): ${*:2})."
+            ;;
+        clear)
+            need_list "$@"
+            confirm "Clear the entire $TYPE $1 list?" && { with_mimic_paused "${cmd_prefix}_CLEAR" "$1" && say "Cleared $TYPE $1 list." || die "Failed to clear the $TYPE $1 list."; } || die "Aborted."
+            ;;
         list) need_list "$@"; "${cmd_prefix}_LIST" "$1" ;;
         *) err "Unknown $TYPE action '$ACTION'"; usage ;;
     esac

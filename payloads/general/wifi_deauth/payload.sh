@@ -103,8 +103,24 @@ if [ -n "${_RECON_SELECTED_CLIENT_MAC_ADDRESS:-}" ] && [ -n "${_RECON_SELECTED_A
 
 elif is_wifi_connected && have_recon_db; then
     __bssid=$(connected_bssid)
-    LOG "Connected to $__bssid - targeting all its clients."
-    if [ -z "$__bssid" ]; then
+    # BUG FOUND AND FIXED (found via code review, confirmed by tracing
+    # connected_bssid()'s own contract): this used to LOG "Connected to
+    # $__bssid..." unconditionally, BEFORE checking whether $__bssid was
+    # actually non-empty. connected_bssid() (lib/common.sh) can legitimately
+    # return empty - it requires `iw` on PATH and a specific "Connected to"
+    # line format, and returns nothing if either isn't there - which is
+    # EXACTLY the case the very next `if [ -z "$__bssid" ]` block already
+    # exists to handle via a manual MAC_PICKER fallback. Hitting that path
+    # meant logging the nonsensical "Connected to  - targeting all its
+    # clients." (empty BSSID) immediately before contradicting it by asking
+    # the user to enter one manually. deauth.sh's own --pick flow (the
+    # sibling implementation of this exact "connected, look up BSSID" case)
+    # already gets this right - it only announces success when $cbssid is
+    # actually non-empty, and says so plainly when it isn't. Match that here.
+    if [ -n "$__bssid" ]; then
+        LOG "Connected to $__bssid - targeting all its clients."
+    else
+        LOG "Connected, but couldn't determine the AP's BSSID via iw - falling back to manual entry."
         __bssid=$(MAC_PICKER "AP BSSID" "") || exit 0
     fi
     __cbssid_nc=$(echo "$__bssid" | tr -d ':' | tr 'a-f' 'A-F')
@@ -147,8 +163,30 @@ elif have_recon_db; then
     # hidden/cloaked AP (which legitimately beacons an empty SSID) could
     # show up as a blank-name entry in this picker instead of being
     # filtered out.
+    # BUG FOUND AND FIXED (confirmed via a standalone repro, not just
+    # theory - same class as deauth.sh's scan_ssid_groups() fix, found
+    # independently here since this payload has its own separate query):
+    # this used to SELECT ssid FIRST, ahead of COUNT(*), with `|` as the
+    # row separator. SSID is attacker-controlled/arbitrary data (802.11's
+    # SSID element is just an arbitrary byte string, no character
+    # restriction) - an SSID containing a literal `|` byte collides with
+    # the `|` used as this output's OWN field separator. Reproduced
+    # standalone: a row for SSID "Evil|Net" with count 3, fed through the
+    # exact `IFS='|' read -r ssid count` pattern below, produced
+    # ssid="Evil" and count="Net|3" instead of the real values - `[ "$count"
+    # = "1" ]` then silently compares against garbage instead of a real
+    # count, and __ssids ends up holding the truncated "Evil" instead of
+    # the true SSID, so picking that entry would launch deauth.sh --ssid
+    # "Evil" (a network recon has no APs for) instead of the real target.
+    # Fix: `read`'s own documented behavior stuffs any surplus delimited
+    # fields into the LAST variable verbatim (embedded separators and all)
+    # rather than splitting further - so COUNT(*) first, ssid LAST (with
+    # only one fixed column ahead of it) makes an embedded `|` in the SSID
+    # transparent instead of corrupting the parse. Re-verified against the
+    # same standalone repro with the columns swapped: `read -r count ssid`
+    # correctly recovered ssid="Evil|Net" intact.
     __groups=$(sqlite3 -separator '|' "$RECON_DB" \
-        "SELECT ssid, COUNT(*) FROM (
+        "SELECT COUNT(*), ssid FROM (
              SELECT s.bssid AS bssid, s.ssid AS ssid, MAX(s.signal) AS signal
              FROM ssid s
              WHERE s.type = 8 AND s.bssid IS NOT NULL AND CAST(s.bssid AS TEXT) != '' AND s.ssid IS NOT NULL AND CAST(s.ssid AS TEXT) != ''
@@ -160,7 +198,7 @@ elif have_recon_db; then
     if [ -n "$__groups" ]; then
         __opts=()
         __ssids=()
-        while IFS='|' read -r ssid count; do
+        while IFS='|' read -r count ssid; do
             [ -z "$ssid" ] && continue
             if [ "$count" = "1" ]; then
                 __opts+=("$ssid")

@@ -96,6 +96,7 @@ sleep 0.2
 __reset_pid=$!
 
 wait "$__reset_pid"
+__reset_rc=$?
 # BUG FOUND AND FIXED: killing the poller immediately after wait() returns
 # raced its own 1s sleep cycle - reset.sh's LAST lines (commonly "Reset
 # complete." itself, the very line this payload's own ALERT below claims
@@ -115,7 +116,33 @@ kill "$__tail_pid" 2>/dev/null
 # honest-reporting behavior). Checking the wait() exit code alone wouldn't
 # catch that; grepping the captured log for the ERROR: lines those
 # functions now actually produce does.
-if grep -q "ERROR:" "$LOG_FILE" 2>/dev/null; then
+#
+# BUG FOUND AND FIXED (silent-failure gap - verified with a standalone
+# repro): grep-for-"ERROR:" alone misses any failure that never reaches
+# reset.sh's own err()/die() calls at all - e.g. reset.sh sources
+# lib/common.sh unconditionally near the top with no existence/success
+# check (`. "$SCRIPT_DIR/lib/common.sh"`); if that file were ever missing
+# or unreadable (partial/corrupted deploy, a botched manual edit, disk
+# issues), bash does NOT abort on a failed `.` by itself even under
+# `set -u` - reproduced standalone: a script that sources a nonexistent
+# file and then calls its own say()-style helper continues running line
+# by line, prints bash's own "command not found"/"No such file or
+# directory" messages (which contain neither "ERROR:" nor anything this
+# grep matches), and finishes with a nonzero exit status (127 in the
+# repro) - meaning every actual repair function (say/err/die/ip_link/
+# canonicalize_lan_topology/etc., all defined in common.sh) would be
+# silently no-ops for the entire run. That is the single worst failure
+# mode this payload could hit - reset.sh is the device's own "put
+# everything back" recovery tool, and this exact bug would have reported
+# "Reset complete" while having genuinely done nothing. wait()'s own exit
+# code was already sitting right there and simply never looked at -
+# checking it alongside the ERROR: grep catches this whole class of
+# failure (anything that kills/short-circuits reset.sh before or outside
+# its own error-reporting helpers) with no cost to the normal-completion
+# case: every normal exit path (the full run falling off the end, and both
+# --fast-restart/--reboot's explicit `exit 0`) already exits 0, so this
+# adds detection without any new false positives.
+if [ "$__reset_rc" -ne 0 ] || grep -q "ERROR:" "$LOG_FILE" 2>/dev/null; then
     ALERT "Reset finished with errors - see log for details"
 else
     ALERT "Reset complete - see log"

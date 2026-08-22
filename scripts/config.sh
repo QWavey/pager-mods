@@ -205,46 +205,90 @@ if [ -n "$MGMT_SSID" ]; then
         if [ -z "$PREV_PW" ]; then
             die "No password given (--mgmt-pw) and no previously saved Management AP password to reuse. Refusing to set an empty WPA key - that could lock you out of Management WiFi. Pass --mgmt-pw explicitly."
         fi
-        WIFI_MGMT_AP wlan0mgmt "$MGMT_SSID" sae-mixed "$PREV_PW" && CHANGED=1
+        # BUG FOUND AND FIXED (found via code review, same class as the
+        # explicit-password branch just above): on failure this branch set
+        # neither CHANGED nor printed any error - the only visible symptom
+        # was the generic "Nothing changed." at the very end of the script,
+        # which reads as "there was nothing to do" rather than "this was
+        # attempted and failed", exactly the ambiguity the branch above
+        # already avoids for the explicit-password case.
+        WIFI_MGMT_AP wlan0mgmt "$MGMT_SSID" sae-mixed "$PREV_PW" && CHANGED=1 || err "Failed to set the Management AP."
     fi
 fi
-[ "$MGMT_HIDE" = "1" ] && { WIFI_MGMT_AP_HIDE wlan0mgmt; CHANGED=1; }
-[ "$MGMT_DISABLE" = "1" ] && { WIFI_MGMT_AP_DISABLE wlan0mgmt; CHANGED=1; }
+# BUG FOUND AND FIXED (found via code review): these two calls had NO
+# feedback of any kind, success or failure - CHANGED was set to 1
+# regardless of whether WIFI_MGMT_AP_HIDE/_DISABLE actually succeeded, and
+# nothing was ever printed either way. Sibling script mgmt.sh wraps these
+# exact same two commands and already checks them ("WIFI_MGMT_AP_HIDE
+# wlan0mgmt && say ... || err ..."), specifically because - per mgmt.sh's
+# own header - this is the one AP in the toolkit whose own settings can cut
+# off the very management channel a command might be issued through, so a
+# silent failure here is worse than most. Brought in line with mgmt.sh.
+[ "$MGMT_HIDE" = "1" ] && { WIFI_MGMT_AP_HIDE wlan0mgmt && { say "Management AP hidden."; CHANGED=1; } || err "Failed to hide the Management AP."; }
+[ "$MGMT_DISABLE" = "1" ] && { WIFI_MGMT_AP_DISABLE wlan0mgmt && { say "Management AP disabled."; CHANGED=1; } || err "Failed to disable the Management AP."; }
 
+# BUG FOUND AND FIXED (found via code review): all four blocks below
+# (--mimic/--ssid-pool-random/--device-filter/--network-filter) called
+# their PINEAPPLE_* command and then printed a success message
+# UNCONDITIONALLY, never checking whether the call actually succeeded. This
+# is exactly the same command config.sh's own header lists as wrapping
+# PINEAPPLE_MIMIC_ENABLE/_DISABLE and PINEAPPLE_SSID_POOL_START - and the
+# sibling scripts that ALSO wrap those exact same platform commands
+# (mimic.sh: "PINEAPPLE_MIMIC_ENABLE && say ... || die/err ..."; ssidpool.sh:
+# "PINEAPPLE_SSID_POOL_START && say ... || err ...") already check their
+# exit codes for this very reason. config.sh silently drifted from that
+# established convention by reimplementing the same calls without the
+# check. Fixed the same way here, and applied the identical pattern to
+# --device-filter/--network-filter for consistency.
 if [ -n "$MIMIC" ]; then
     case "$MIMIC" in
-        on|1|true)  PINEAPPLE_MIMIC_ENABLE; say "Mimic mode: on"; CHANGED=1 ;;
-        off|0|false) PINEAPPLE_MIMIC_DISABLE; say "Mimic mode: off"; CHANGED=1 ;;
+        on|1|true)  PINEAPPLE_MIMIC_ENABLE && { say "Mimic mode: on"; CHANGED=1; } || err "Failed to enable mimic mode." ;;
+        off|0|false) PINEAPPLE_MIMIC_DISABLE && { say "Mimic mode: off"; CHANGED=1; } || err "Failed to disable mimic mode." ;;
         *) err "--mimic expects on/off" ;;
     esac
 fi
 
 if [ -n "$SSID_POOL_RANDOM" ]; then
     case "$SSID_POOL_RANDOM" in
-        on|1|true)  PINEAPPLE_SSID_POOL_START random; say "SSID pool advertising: on, randomized BSSID"; CHANGED=1 ;;
-        off|0|false) PINEAPPLE_SSID_POOL_START; say "SSID pool advertising: on, fixed BSSID"; CHANGED=1 ;;
+        on|1|true)  PINEAPPLE_SSID_POOL_START random && { say "SSID pool advertising: on, randomized BSSID"; CHANGED=1; } || err "Failed to start SSID pool advertising." ;;
+        off|0|false) PINEAPPLE_SSID_POOL_START && { say "SSID pool advertising: on, fixed BSSID"; CHANGED=1; } || err "Failed to start SSID pool advertising." ;;
         *) err "--ssid-pool-random expects on/off" ;;
     esac
 fi
 
 if [ -n "$DEVICE_FILTER" ]; then
     case "$DEVICE_FILTER" in
-        allow|deny) PINEAPPLE_DEVICE_FILTER_MODE "$DEVICE_FILTER"; say "Device filter mode: $DEVICE_FILTER"; CHANGED=1 ;;
+        allow|deny) PINEAPPLE_DEVICE_FILTER_MODE "$DEVICE_FILTER" && { say "Device filter mode: $DEVICE_FILTER"; CHANGED=1; } || err "Failed to set the device filter mode." ;;
         *) err "--device-filter expects allow/deny" ;;
     esac
 fi
 
 if [ -n "$NETWORK_FILTER" ]; then
     case "$NETWORK_FILTER" in
-        allow|deny) PINEAPPLE_NETWORK_FILTER_MODE "$NETWORK_FILTER"; say "Network filter mode: $NETWORK_FILTER"; CHANGED=1 ;;
+        allow|deny) PINEAPPLE_NETWORK_FILTER_MODE "$NETWORK_FILTER" && { say "Network filter mode: $NETWORK_FILTER"; CHANGED=1; } || err "Failed to set the network filter mode." ;;
         *) err "--network-filter expects allow/deny" ;;
     esac
 fi
 
+# BUG FOUND AND FIXED (found via code review - directly answers this
+# file's own header question "does every config write actually persist
+# correctly?"): --set and --del called cfg_set/cfg_del and then printed
+# "Stored .../Deleted ..." UNCONDITIONALLY, never looking at either
+# wrapper's real exit code. cfg_set()/cfg_del() (lib/common.sh) are thin
+# wrappers whose own return status IS PAYLOAD_SET_CONFIG/PAYLOAD_DEL_
+# CONFIG's real exit code (the >/dev/null 2>&1 redirection inside them only
+# silences output, it doesn't touch $?) - so a failed write (storage full,
+# the shared PAYLOAD_*_CONFIG store unavailable, etc.) would still report
+# success, indistinguishable from a genuine one. Verified with a standalone
+# snippet: a function that `return 1`s, called bare as `f; echo done`,
+# unconditionally reaches the echo - confirming this exact call shape
+# (`cmd; say ...` with no &&/||) can never surface a failure, exactly
+# matching the "unconditional success message" class already fixed
+# throughout this codebase (bands.sh/gps.sh/screen.sh/wigle.sh/
+# reconsession.sh, etc.) for other platform calls - just missed here for
+# config.sh's own PAYLOAD_*_CONFIG writes.
 if [ -n "$SET_KEY" ]; then
-    cfg_set "$SET_KEY" "$SET_VAL"
-    say "Stored $SET_KEY = $SET_VAL"
-    CHANGED=1
+    cfg_set "$SET_KEY" "$SET_VAL" && { say "Stored $SET_KEY = $SET_VAL"; CHANGED=1; } || err "Failed to store $SET_KEY - the setting may not have been saved."
 fi
 
 if [ -n "$GET_KEY" ]; then
@@ -253,9 +297,7 @@ if [ -n "$GET_KEY" ]; then
 fi
 
 if [ -n "$DEL_KEY" ]; then
-    cfg_del "$DEL_KEY"
-    say "Deleted $DEL_KEY"
-    CHANGED=1
+    cfg_del "$DEL_KEY" && { say "Deleted $DEL_KEY"; CHANGED=1; } || err "Failed to delete $DEL_KEY."
 fi
 
 if [ -n "$SYS_HOSTNAME" ]; then

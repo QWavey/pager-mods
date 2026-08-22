@@ -179,5 +179,26 @@ if [ $RC -eq 0 ]; then
     tail -n 40 "$OUTPUT"
 else
     err "nmap exited with code $RC"
+    # BUG FOUND AND FIXED (found via code review, confirmed by direct
+    # testing against the real nmap binary): nmap opens/creates its -oN
+    # output file immediately when it starts, BEFORE any actual scanning -
+    # confirmed live: `nmap -oN out.txt --script vuln -p1-65535 -Pn
+    # 127.0.0.1`, killed with `kill -9` 1-3s in (simulating an OOM-kill on
+    # this device's 251MB RAM during a heavy full/vuln scan, or the
+    # payload runner force-killing a hung script), left a genuine 0-byte
+    # out.txt on disk. report.sh's LAN-scan section picks the newest
+    # matching file in $LOOT_DIR as "Most recent" and counts "Nmap scan
+    # report for" lines in it for "Hosts found" - a 0-byte file from a
+    # scan that never ran to completion reports "Hosts found: 0",
+    # completely indistinguishable there from a real, successful scan of
+    # a genuinely empty subnet. Rename the failed/partial file out of the
+    # way (report.sh's lookup now explicitly excludes "*.incomplete")
+    # instead of leaving it to masquerade as a completed result - it's
+    # kept on disk, not deleted, in case the partial content is still
+    # useful for debugging.
+    if [ -f "$OUTPUT" ]; then
+        mv "$OUTPUT" "$OUTPUT.incomplete" 2>/dev/null && \
+            err "Partial/failed output kept at $OUTPUT.incomplete (not a completed scan - won't show up as one in report.sh)."
+    fi
 fi
 exit $RC

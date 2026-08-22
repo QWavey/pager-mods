@@ -56,8 +56,16 @@ fi
 
 if [ "$DO_CLEAR" = "1" ]; then
     confirm "Wipe the Management AP configuration entirely?" || die "Aborted."
-    WIFI_MGMT_AP_CLEAR wlan0mgmt
-    say "Cleared."
+    # BUG FOUND AND FIXED (bug-hunt pass, same class as the "found via code
+    # review" fix right below for --hide/--off, and the last_ssid fix
+    # further down - just missed here): this called WIFI_MGMT_AP_CLEAR and
+    # then printed "Cleared." and `exit 0`ed UNCONDITIONALLY, regardless of
+    # whether the clear actually succeeded - both the message AND the exit
+    # code lied on a real failure, unlike --on/--hide/--off which all check
+    # their own command's exit status. Confirmed via static trace: nothing
+    # between the call and `exit 0` ever inspected $?. Now checked like
+    # every sibling action in this file.
+    WIFI_MGMT_AP_CLEAR wlan0mgmt && say "Cleared." || die "Failed to clear the Management AP configuration."
     exit 0
 fi
 
@@ -82,8 +90,20 @@ fi
 if [ "$DO_OFF" = "1" ] && [ "$ASSUME_YES" != "1" ]; then
     confirm "Disable the Management AP? If you're connected to it over Management WiFi right now (not USB-C), this WILL disconnect your current session." || die "Aborted."
 fi
-[ "$DO_HIDE" = "1" ] && { WIFI_MGMT_AP_HIDE wlan0mgmt && say "Management AP hidden." || err "Failed to hide the Management AP."; }
-[ "$DO_OFF" = "1" ] && { WIFI_MGMT_AP_DISABLE wlan0mgmt && say "Management AP disabled." || err "Failed to disable the Management AP."; }
+# BUG FOUND AND FIXED (bug-hunt pass, verified by tracing control flow to
+# the bottom of the file): on failure these only ever called `err` (a
+# stderr message) and then fell straight through - past the untouched
+# DO_ON block below - to the script's own unconditional `exit 0` at the
+# very end. A caller/automation checking `$?` after `mgmt.sh --off` (e.g.
+# to confirm the Management AP is really down before doing something else)
+# would see a clean 0 even when WIFI_MGMT_AP_DISABLE genuinely failed -
+# inconsistent with --on and --clear, which both correctly `die` (exit 1)
+# on the same kind of failure. Reproduced the exact swallow with a
+# standalone bash snippet mirroring this exact `[ ... ] && { cmd && ok ||
+# err; }` shape: it printed the error but still exited 0. Now `die`s like
+# every sibling action path in this file.
+[ "$DO_HIDE" = "1" ] && { WIFI_MGMT_AP_HIDE wlan0mgmt && say "Management AP hidden." || die "Failed to hide the Management AP."; }
+[ "$DO_OFF" = "1" ] && { WIFI_MGMT_AP_DISABLE wlan0mgmt && say "Management AP disabled." || die "Failed to disable the Management AP."; }
 
 INTERACTIVE=0
 [ "$DO_ON" = "0" ] && [ "$DO_OFF" = "0" ] && [ "$DO_HIDE" = "0" ] && [ "$DO_CLEAR" = "0" ] && INTERACTIVE=1

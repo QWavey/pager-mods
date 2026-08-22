@@ -83,7 +83,29 @@ gen_report() {
     echo "- $n file(s) in $LOOT_ROOT/lanscan/"
     if [ "$n" -gt 0 ]; then
         local latest
-        latest=$(find "$LOOT_ROOT/lanscan" -type f -name '*.txt' 2>/dev/null | sort | tail -1)
+        # BUG FOUND AND FIXED (found via code review, confirmed by direct
+        # reproduction): this picked "most recent" via `find | sort | tail
+        # -1` on the FULL filename - but LanScan.sh's own filenames are
+        # "lanscan-${MODE}-${STAMP}.txt", i.e. the scan MODE sits BEFORE
+        # the timestamp. A plain lexical sort therefore groups files by
+        # mode name first and only by date second, so it does not reliably
+        # return the actually-most-recent scan whenever more than one mode
+        # has been used. Confirmed by reproduction: a "quick" scan from
+        # 2025-12-31 and a genuinely newer "full" scan from 2026-01-01 (both
+        # by filename timestamp AND real mtime) - `sort | tail -1` picked
+        # the OLDER "quick" file every time, purely because "quick" > "full"
+        # alphabetically. This also silently required the "most recent" hit
+        # to end in ".txt" specifically, so a scan saved via LanScan.sh's
+        # own `--output custom.name` (any other extension) was counted in
+        # $n above but could never be picked here either. `ls -t` sorts by
+        # actual modification time instead of filename text, fixing both:
+        # any file is eligible (matching $n's own "any file" count), and the
+        # one actually picked is genuinely the most recently written one.
+        # ".incomplete" files (a killed/failed scan - see LanScan.sh's own
+        # fix for why those exist) are explicitly excluded so a failed run
+        # is never shown here as if it were a completed result.
+        latest=$(ls -t "$LOOT_ROOT/lanscan" 2>/dev/null | grep -v '\.incomplete$' | head -1)
+        [ -n "$latest" ] && latest="$LOOT_ROOT/lanscan/$latest"
         if [ -n "$latest" ]; then
             echo "  Most recent: $latest"
             local hosts
@@ -201,7 +223,17 @@ gen_report() {
     [ "$other_found" = "1" ] && echo
 
     local total_size
+    # BUG FOUND AND FIXED (found via code review, confirmed by direct
+    # testing): `du -sh` on a directory that doesn't exist at all prints
+    # nothing to stdout and exits non-zero (confirmed: `du -sh
+    # /nonexistent 2>/dev/null` produces empty stdout) - $LOOT_ROOT itself
+    # is never created by this script (only $REPORT_DIR is, and only for
+    # --save), so running report.sh before ANY toolkit script has ever
+    # written to /root/loot/ (the most extreme case of the "partial/empty
+    # toolkit run" this aggregator needs to survive) left this line reading
+    # just "- " with nothing after it instead of a clear "0" or similar.
     total_size=$(du -sh "$LOOT_ROOT" 2>/dev/null | awk '{print $1}')
+    total_size="${total_size:-0}"
     echo "## Total loot size"
     echo "- $total_size"
 }

@@ -57,6 +57,27 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# BUG FOUND AND FIXED (found via code review; this is the exact gap this
+# codebase's own convention already closed everywhere else a numeric CLI
+# arg is handed to a blocking command - see bluetooth.sh's --duration/
+# --burst/--scan-time/--size and sniff.sh's --duration/--count, both of
+# which explicitly call out "every other numeric flag elsewhere ...
+# rejects a non-numeric value up front" - --timeout here was never given
+# the same check, even though it flows straight into WIFI_WAIT below.
+# Verified with a standalone snippet (same `case ... *[!0-9]*` pattern
+# already used throughout the codebase): "", "abc", "-5", "12abc" are all
+# rejected while "20"/"0" pass. Concretely, an un-validated garbage value
+# (e.g. a typo'd `--timeout 3o`) would reach `WIFI_WAIT wlan0cli "$TIMEOUT"`
+# and fail there instead of here - and because that failure is
+# indistinguishable from a genuine "did not associate" (same `die` message
+# below, same exit path), a successful connection could be reported as a
+# failure (or vice versa, depending on how WIFI_WAIT itself handles a
+# non-numeric argument) with no clue the real problem was the --timeout
+# value itself. Reject it immediately with a clear, specific reason instead.
+case "$TIMEOUT" in
+    ''|*[!0-9]*) die "'--timeout' needs a whole number of seconds (got '$TIMEOUT')." ;;
+esac
+
 if [ "$DO_STATUS" = "1" ]; then
     say "WiFi client status:"
     ip -4 addr show wlan0cli 2>/dev/null || echo "  wlan0cli not configured"
@@ -65,14 +86,25 @@ fi
 
 if [ "$DO_CLEAR" = "1" ]; then
     confirm "Disconnect and forget the saved WiFi client network?" || die "Aborted."
-    WIFI_CLEAR wlan0cli
-    say "Disconnected and cleared."
+    # BUG FOUND AND FIXED (found via code review - the same "silent on
+    # failure" class this codebase has repeatedly found and fixed elsewhere,
+    # e.g. mimic.sh's header lists dns.sh/dnsspoof.sh/gps.sh/mgmt.sh/
+    # openap.sh/pcap.sh/.../wigle.sh as already fixed for exactly this -
+    # this call had no `||` at all: WIFI_CLEAR failing produced the same
+    # "Disconnected and cleared." success message as it actually working,
+    # with no way to tell the two apart).
+    WIFI_CLEAR wlan0cli && say "Disconnected and cleared." || die "Failed to clear the WiFi client configuration."
     exit 0
 fi
 
 if [ "$DO_OFF" = "1" ]; then
-    WIFI_DISCONNECT wlan0cli
-    say "Disconnected (config kept - reconnect with connect.sh --name ... again, or just rerun with no args)."
+    # BUG FOUND AND FIXED (same class as --clear above): wifi.sh (this
+    # script's sibling, also in scope) already checks WIFI_DISCONNECT's
+    # exit status for the identical command ("Failed to disconnect the
+    # WiFi client - it may still be associated.") - this --off branch was
+    # the one place in this file still printing "Disconnected" unconditionally
+    # regardless of whether WIFI_DISCONNECT actually succeeded.
+    WIFI_DISCONNECT wlan0cli && say "Disconnected (config kept - reconnect with connect.sh --name ... again, or just rerun with no args)." || die "Failed to disconnect the WiFi client - it may still be associated."
     exit 0
 fi
 

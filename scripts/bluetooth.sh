@@ -178,6 +178,26 @@ case "$BURST" in ''|*[!0-9]*) die "'--burst' needs a whole number of seconds (go
 case "$SCAN_TIME" in ''|*[!0-9]*) die "'--scan-time' needs a whole number of seconds (got '$SCAN_TIME')." ;; esac
 case "$SIZE" in ''|*[!0-9]*) die "'--size' needs a whole number of bytes (got '$SIZE')." ;; esac
 [ -n "$DURATION" ] && case "$DURATION" in *[!0-9]*) die "'--duration' needs a whole number of seconds (got '$DURATION')." ;; esac
+# BUG FOUND AND FIXED (found via code review, confirmed locally: `timeout 0
+# sleep 3` really does run sleep to completion instead of timing out
+# instantly - both GNU coreutils and the busybox this device ships treat a
+# 0 duration as "timeout disabled", matching this file's own comment on
+# run_flood's DURATION handling above). Unlike DURATION, BURST and
+# SCAN_TIME are whole-number CLI args that get handed straight to `timeout`
+# as the actual bound (l2ping_burst's `timeout "$secs" l2ping ...` and
+# scan_macs/scan_ble_macs's `timeout "$secs" hcitool ...`), not compared
+# against `-gt 0` first the way DURATION is in run_jam_area/run_disrupt.
+# The "whole number" check above accepted 0 for both - so `--burst 0` makes
+# run_jam_area's per-device flood in each rotation run with NO timeout at
+# all (floods the first device forever, never rotating to the rest - the
+# exact opposite of what "0 seconds per device" should mean), and
+# `--scan-time 0` makes the pre-jam scan (or a plain --scan --duration 0)
+# hang indefinitely instead of returning instantly. Requiring at least 1
+# closes the same "0 silently means unbounded" trap this file already
+# fails closed against for --duration, just via range-checking instead of
+# the `-gt 0` comparison DURATION already gets a pass on.
+[ "$BURST" -ge 1 ] || die "'--burst' must be at least 1 second (got '$BURST') - 0 doesn't mean 'skip it', it means 'no timeout at all' on this device's timeout implementation, which floods the first device forever instead of rotating."
+[ "$SCAN_TIME" -ge 1 ] || die "'--scan-time' must be at least 1 second (got '$SCAN_TIME') - 0 doesn't mean 'skip scanning', it means 'no timeout at all' on this device's timeout implementation, which hangs the scan indefinitely."
 
 STOPPING=0
 _bt_on_stop() { STOPPING=1; }
@@ -269,9 +289,27 @@ fi
 
 command -v hciconfig >/dev/null 2>&1 || die "BlueZ tools not found (hciconfig missing) - is bluez-utils installed?"
 
+# BUG FOUND AND FIXED (found via code review; same class already fixed for
+# the identical calls in reset.sh's reset_bluetooth() - "only the btmgmt
+# call here had a timeout - hcitool and both hciconfig calls did not,
+# despite doing the exact same kind of thing (talking to the Bluetooth
+# radio/HCI socket) that could just as easily hang"): ensure_radio_up() is
+# the very first thing every single code path in this script calls -
+# --scan, --flood, --jam-area, --disrupt, and the interactive menu all run
+# through it - yet neither hciconfig call here had a timeout at all, unlike
+# every btmgmt/hcitool call elsewhere in this file. advspam_instance_count's
+# own comment already establishes why this matters even for calls that look
+# "just foreground": "if bluetooth.sh is invoked from a caller that's
+# already backgrounded (the Control Panel web server, or possibly a
+# payload) the hang can still happen" - and bluetooth_jam/payload.sh is
+# exactly that caller. A hung hciconfig here would freeze the entire
+# script, not just one technique, with no cleanup path at all (unlike
+# --disrupt, which at least has --stop's unconditional LE Test End as a
+# backstop). Bounded both calls the same way as reset.sh, for the same
+# reason.
 ensure_radio_up() {
-    hciconfig hci0 >/dev/null 2>&1 || die "No Bluetooth adapter (hci0) found."
-    hciconfig hci0 up >/dev/null 2>&1
+    timeout 5 hciconfig hci0 >/dev/null 2>&1 || die "No Bluetooth adapter (hci0) found."
+    timeout 5 hciconfig hci0 up >/dev/null 2>&1
 }
 
 if [ "$DO_SCAN" = "1" ]; then
@@ -492,7 +530,27 @@ run_advspam() {
 run_disrupt() {
     ensure_radio_up
     command -v hcitool >/dev/null 2>&1 || die "hcitool not found."
-    hcitool cmd 0x08 0x001f >/dev/null 2>&1  # clean start: end any stray test mode first
+    # BUG FOUND AND FIXED (found via code review; same class already fixed
+    # for the identical "hcitool cmd 0x08 0x001f" call in the --stop handler
+    # above, whose own comment says outright: "this call had no timeout
+    # despite talking to the same HCI socket that could hang"). Every
+    # hcitool call in this whole function - this clean-start call, the EXIT
+    # trap just below, and both calls inside the main sweep loop further
+    # down - was still missing that same timeout. That's the worst possible
+    # place for this gap: run_disrupt is the one technique whose whole job
+    # is to put the radio into Direct Test Mode, and it's commonly launched
+    # via --background, i.e. exactly the "not the shell's direct foreground
+    # process" condition this device's btmgmt/hcitool hang is keyed to (see
+    # run_advspam's comment - reproduced across "&", a subshell, setsid, an
+    # allocated pty, and a separate atd job). A hang on any of these calls
+    # doesn't just freeze this function - since bash defers a pending
+    # trap/signal until the current foreground command returns, the loop's
+    # own INT/TERM-driven STOPPING check (and this very EXIT trap) can't
+    # run either, so it stops being "belt-and-suspenders" and starts being
+    # the ONLY thing between a hung call and a radio stuck transmitting
+    # test packets indefinitely (unusable Bluetooth until reset/reboot).
+    # Bounded every one exactly like the --stop handler already does.
+    timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1  # clean start: end any stray test mode first
 
     # Extra safety net for the FOREGROUND case (Ctrl+C, not --stop): the
     # --stop belt-and-suspenders fix only covers backgrounded runs. An EXIT
@@ -503,7 +561,7 @@ run_disrupt() {
     # on backgrounded subshells. Belt-and-suspenders on belt-and-suspenders
     # here on purpose - leaving the radio stuck transmitting is bad enough
     # to warrant it.
-    trap 'hcitool cmd 0x08 0x001f >/dev/null 2>&1' EXIT
+    trap 'timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1' EXIT
 
     local dur="${DURATION:-0}" deadline=0
     [ "$dur" -gt 0 ] 2>/dev/null && deadline=$(( $(date +%s 2>/dev/null || echo 0) + dur ))
@@ -569,12 +627,15 @@ run_disrupt() {
             fi
             # 25 (0x19) = max payload length for LE Transmitter Test [v1];
             # payload type 00 = PRBS9 pseudo-random pattern.
-            hcitool cmd 0x08 0x001e "$(printf '%02x' "$ch")" 25 00 >>"$LOGFILE" 2>&1
+            # (timeout-wrapped - see the "BUG FOUND AND FIXED" comment at
+            # the top of this function for why every hcitool call here
+            # needs one.)
+            timeout 5 hcitool cmd 0x08 0x001e "$(printf '%02x' "$ch")" 25 00 >>"$LOGFILE" 2>&1
             sleep "$DWELL"
-            hcitool cmd 0x08 0x001f >>"$LOGFILE" 2>&1
+            timeout 5 hcitool cmd 0x08 0x001f >>"$LOGFILE" 2>&1
         done
     done
-    hcitool cmd 0x08 0x001f >/dev/null 2>&1  # make sure we don't leave the radio stuck transmitting
+    timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1  # make sure we don't leave the radio stuck transmitting
     say "Stopped."
 }
 
@@ -668,7 +729,11 @@ fi
 
 echo "== bluetooth.sh =="
 ensure_radio_up
-say "Adapter: $(hciconfig hci0 | head -1)"
+# BUG FOUND AND FIXED (same class as ensure_radio_up's fix above): this
+# hciconfig call had no timeout either - the interactive menu is the
+# default invocation with no arguments, so a hang here freezes the tool
+# before the user even sees the action prompt.
+say "Adapter: $(timeout 5 hciconfig hci0 | head -1)"
 # BUG FOUND AND FIXED (found via code review): the interactive menu only
 # ever offered s/f/j/a - --disrupt (Direct Test Mode spectrum occupation,
 # one of the four techniques this script documents and the CLI supports)
@@ -699,8 +764,15 @@ case "$action" in
     j*)
         SCAN_TIME=$(ask "Scan time before jamming starts (seconds)" "15")
         case "$SCAN_TIME" in ''|*[!0-9]*) die "'$SCAN_TIME' isn't a whole number of seconds." ;; esac
+        # BUG FOUND AND FIXED (same class as the CLI --scan-time/--burst fix
+        # above): the interactive prompts had the same "0 is accepted as a
+        # whole number" gap, which means "0 doesn't mean 'skip it', it means
+        # 'no timeout at all' on this device (confirmed: see the CLI
+        # validation's own comment).
+        [ "$SCAN_TIME" -ge 1 ] || die "'$SCAN_TIME' must be at least 1 second - 0 hangs the scan indefinitely instead of skipping it."
         BURST=$(ask "Flood duration per device, per rotation (seconds)" "$BURST")
         case "$BURST" in ''|*[!0-9]*) die "'$BURST' isn't a whole number of seconds." ;; esac
+        [ "$BURST" -ge 1 ] || die "'$BURST' must be at least 1 second - 0 floods the first device forever instead of rotating."
         DURATION=$(ask "Duration in seconds (blank = until Ctrl+C)" "")
         [ -n "$DURATION" ] && case "$DURATION" in *[!0-9]*) die "'$DURATION' isn't a whole number of seconds." ;; esac
         say "This scans, then L2CAP-floods EVERY Bluetooth device it finds nearby."

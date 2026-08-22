@@ -469,6 +469,24 @@ def main():
 
     print("Connected. Uploading scripts...")
     sftp = client.open_sftp()
+    # BUG FOUND AND FIXED: paramiko's SFTPClient never sets a timeout on its
+    # underlying channel by itself - confirmed by reading paramiko's own
+    # source (site-packages/paramiko/sftp_client.py has zero references to
+    # `timeout`/`settimeout` anywhere in the file). client.connect(...)'s
+    # own timeout=10 above only bounds the initial TCP connect/handshake;
+    # it does nothing for operations on channels opened afterward. That
+    # means every sftp.mkdir()/putfo()/remove() call below could block
+    # forever on a stalled connection (WiFi drop mid-upload, device losing
+    # power) instead of raising promptly - exactly the "device disconnects
+    # mid-deploy" case this module's docstring already designs around via
+    # the incremental state cache, except without this the script would
+    # just hang instead of ever reaching the point of failing (cleanly or
+    # otherwise). paramiko's own SFTPClient.get_channel() docstring
+    # literally suggests this exact fix ("useful for doing things like
+    # setting a timeout on the channel") - applying it bounds every
+    # individual blocking read/write, not the whole transfer, so a large
+    # file that's still actively moving data is unaffected.
+    sftp.get_channel().settimeout(30)
     local_scripts = os.path.join(HERE, "scripts")
     if not os.path.isdir(local_scripts):
         print(f"ERROR: {local_scripts} not found - is this setup.py still next to its scripts/ folder?")
@@ -563,6 +581,7 @@ def main():
     if not args.skip_payloads:
         print("Deploying custom payloads...")
         sftp = client.open_sftp()
+        sftp.get_channel().settimeout(30)  # see the same fix on the scripts sftp session above
         local_payloads = os.path.join(HERE, "payloads")
         run("mkdir -p /root/payloads/user")
         deploy_payloads(client, sftp, local_payloads, log, state, force=args.force)
@@ -589,4 +608,31 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # BUG FOUND AND FIXED: only the initial client.connect() call (inside
+    # main()) was ever wrapped in a try/except - every subsequent operation
+    # (run()'s exec_command() calls, upload_tree()'s/deploy_payloads()'s
+    # direct sftp.mkdir()/putfo()/remove() calls, ensure_usb_monitor_
+    # autostart()'s own sftp read/write of /etc/rc.local) assumes the SSH
+    # session stays up for the whole deploy. Traced every call site between
+    # the connect() and client.close() at the end of main(): none of them
+    # are guarded, so a real mid-deploy disconnect (WiFi dropout, device
+    # reboot, or now also the sftp channel timeout added above) raises
+    # paramiko.SSHException/OSError/socket.timeout straight out of main()
+    # with nothing to catch it - a raw Python traceback instead of the
+    # clean "ERROR: ..." + exit(1) every other failure path in this file
+    # already uses (see the connect() except clause just above, and
+    # read_config()'s). This is purely a presentation gap, not a data-loss
+    # one: state is saved via save_state() after every phase (scripts,
+    # payloads), so a disconnect never loses already-pushed progress -
+    # re-running setup.py picks up incrementally right where it left off.
+    # Catching it here at the outermost level turns that into the same
+    # actionable message instead of a scary traceback.
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nERROR: lost connection or a command failed mid-deploy: {e}")
+        print("Progress so far was saved (.deploy_state.json) - just re-run setup.py to resume.")
+        sys.exit(1)

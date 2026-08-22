@@ -82,8 +82,27 @@ run_logger() {
     [ -d /mmc ] || { echo "crash_logger.sh: /mmc not mounted - refusing to start (would log to RAM, defeating the purpose)." >&2; exit 1; }
     echo "=== crash_logger started $(date) ===" >> "$LOGFILE"
     sync
-    local seen total
+    local seen total loop_count=0
     seen=$(dmesg 2>/dev/null | wc -l)
+    # BUG FOUND AND FIXED (bug-hunt pass - exactly the "log file that's
+    # never rotated/truncated" class this session was asked to hunt for):
+    # this loop runs continuously, across every reboot, for as long as the
+    # device is up - LOGFILE had no size bound at all, appending forever.
+    # /mmc is a real but FINITE, SHARED partition (3.3GB free, confirmed
+    # live per this file's own header) also used for pcaps/loot by other
+    # tools in this toolkit - an unbounded dmesg log left running for
+    # weeks/months (or one especially chatty crash cascade, exactly the
+    # scenario this tool exists to capture, which can dump the WHOLE ring
+    # buffer repeatedly - see the wrap-handling branch below) could
+    # eventually fill it, which would then break every OTHER tool relying
+    # on /mmc, not just this one. Same "keep only the most recent N" bound
+    # already established by topology_log() in lib/common.sh, just sized
+    # for a forensic dmesg log instead of a topology transition log, and
+    # checked only every ~60 polls (a byte-count check on every single 1s
+    # poll would be wasteful) rather than on every single one - rotates
+    # (keeps the tail) instead of deleting so recent forensic context
+    # always survives.
+    local max_log_bytes=$((20 * 1024 * 1024))
     while true; do
         total=$(dmesg 2>/dev/null | wc -l)
         if [ "$total" -gt "$seen" ] 2>/dev/null; then
@@ -116,6 +135,17 @@ run_logger() {
             dmesg 2>/dev/null >> "$LOGFILE"
             sync
             seen="$total"
+        fi
+        loop_count=$((loop_count + 1))
+        if [ "$((loop_count % 60))" -eq 0 ]; then
+            local sz
+            sz=$(wc -c <"$LOGFILE" 2>/dev/null || echo 0)
+            if [ "$sz" -gt "$max_log_bytes" ] 2>/dev/null; then
+                tail -c "$max_log_bytes" "$LOGFILE" >"${LOGFILE}.tmp.$$" 2>/dev/null && mv "${LOGFILE}.tmp.$$" "$LOGFILE" 2>/dev/null
+                rm -f "${LOGFILE}.tmp.$$" 2>/dev/null
+                echo "=== crash_logger: log rotated (exceeded $((max_log_bytes / 1024 / 1024))MB) - oldest history trimmed ===" >> "$LOGFILE"
+                sync
+            fi
         fi
         sleep 1
     done

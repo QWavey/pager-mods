@@ -32,6 +32,23 @@ done
 # for exactly this.
 is_valid_mac "$MAC" || die "'$MAC' doesn't look like a valid MAC address (expected AA:BB:CC:DD:EE:FF)."
 
+# BUG FOUND AND FIXED (found via code review - the same gap fixed in
+# connect.sh's --timeout, which wraps a sibling command with the identical
+# unvalidated pattern; matches the established convention elsewhere in this
+# codebase, e.g. sniff.sh's "[ -n "$DURATION" ] && case ... *[!0-9]*"
+# guard for an optional numeric flag). --timeout here is optional (empty
+# means "let FIND_CLIENT_IP use its own default"), so only validate it when
+# actually given. Verified with a standalone snippet: "abc"/"-5"/"12abc"
+# are rejected while a bare number passes. Without this, a typo'd
+# `--timeout 3o` was handed straight to FIND_CLIENT_IP; whatever it does
+# with a garbage value (fail fast, misinterpret it, or silently fall back)
+# would look identical to "client not connected yet" - the exact
+# "indistinguishable failure" class this toolkit's numeric-arg convention
+# exists to prevent.
+[ -n "$TIMEOUT" ] && case "$TIMEOUT" in
+    *[!0-9]*) die "'--timeout' needs a whole number of seconds (got '$TIMEOUT')." ;;
+esac
+
 if [ -n "$TIMEOUT" ]; then
     ip=$(FIND_CLIENT_IP "$MAC" "$TIMEOUT")
 else

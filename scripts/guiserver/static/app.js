@@ -169,10 +169,25 @@
     } catch (e) { out.textContent = String(e); }
   }
 
-  btn("wifiStatus").onclick = refreshWifiStatus;
-  btn("etStatus").onclick = refreshEvilTwinStatus;
-  btn("payloadRefresh").onclick = refreshPayloads;
-  btn("lootList").onclick = refreshLoot;
+  // BUG FOUND AND FIXED (found via code review): these four buttons were
+  // wired directly (`btn(id).onclick = fn`) instead of through onClick()
+  // below - so unlike every other button in this panel, they had no
+  // disable-while-in-flight guard. Rapid double-clicking (or a stray double
+  // tap on mobile) fires two overlapping fetches for the same output
+  // element; nothing here enforces response ordering, so if the first
+  // request's response happens to arrive after the second one's (plausible
+  // over WiFi with variable latency, especially with wifi.sh --status
+  // shelling out to iw/ip underneath), the OLDER result silently overwrites
+  // the newer one on screen - exactly the "button can be double-clicked to
+  // fire two overlapping requests" race this whole file's other buttons
+  // (via onClick()'s `b.disabled = true` for the duration of the call) are
+  // already protected against. Routing these through onClick() too closes
+  // the same gap for them, with no behavior change otherwise (each function
+  // already does its own try/catch internally).
+  onClick("wifiStatus", refreshWifiStatus);
+  onClick("etStatus", refreshEvilTwinStatus);
+  onClick("payloadRefresh", refreshPayloads);
+  onClick("lootList", refreshLoot);
 
   // ===========================================================================
   // BIG CHANGE (real rearchitecture, not a dedup): this file used to be ~25
@@ -406,10 +421,35 @@
   // press Status manually to even notice something was still running.
   // Checks each backgrounded script's real status on load and resumes
   // tailing automatically if it's already active.
+  // BUG FOUND AND FIXED (found via code review, confirmed by reading the
+  // actual --status output of every script this calls): the check here was
+  // `/running/i.test(r.stdout)` - a plain case-insensitive substring test
+  // for "running". deauth.sh/bluetooth.sh's NOT-running status line is
+  // literally "Not running." and sniff.sh's is the same - both CONTAIN the
+  // substring "running", so this test was true for "Not running." just as
+  // much as for "Running (PID 123)." or sniff.sh's "Capture running (PID
+  // 123).". Verified with the exact strings these scripts print
+  // (deauth.sh/bluetooth.sh: "Not running."/"Running (PID ...)."; sniff.sh:
+  // "Not running."/"Capture running (PID ...)."):
+  //   /running/i.test("Not running.")                -> true  (WRONG)
+  //   /running/i.test("Running (PID 123).")           -> true  (right)
+  //   /running/i.test("Capture running (PID 123).")   -> true  (right)
+  // Net effect: on EVERY page load, for all three backgrounded scripts,
+  // this always evaluated true (since the common "nothing is running" case
+  // literally always contains the word "running") - so the panel always
+  // claimed "-- already running, resuming live output --" and kept a
+  // 1.5s tail-poll running forever for deauth/sniff/bluetooth even with
+  // nothing active, defeating the whole point of this check. A plain
+  // case-sensitive "Running" check doesn't work either - sniff.sh's actual
+  // running message is "Capture running" with a lowercase r. Excluding the
+  // "not running" case specifically (case-insensitively) is the minimal fix
+  // that correctly matches both real "running" phrasings while rejecting
+  // the "Not running." one; verified against all three scripts' exact
+  // strings above.
   async function resumeTailingIfRunning(script, outEl) {
     try {
       const r = await run(script, ["--status"], { timeout: 10 });
-      if (r.stdout && /running/i.test(r.stdout)) {
+      if (r.stdout && /running/i.test(r.stdout) && !/not running/i.test(r.stdout)) {
         outEl.textContent = (outEl.textContent ? outEl.textContent + "\n" : "") + "-- already running, resuming live output --";
         startTailing(script, outEl);
       }

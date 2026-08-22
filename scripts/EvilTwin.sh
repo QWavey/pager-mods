@@ -404,8 +404,31 @@ cfg_set last_mimic "$MIMIC"
 cfg_set last_record "$RECORD"
 cfg_set last_bssid "$BSSID"
 cfg_set last_scope_filter "$SCOPE_FILTER"
-[ -n "$UPLINK_SSID" ] && cfg_set last_uplink_ssid "$UPLINK_SSID"
-[ -n "$UPLINK_PW" ] && cfg_set last_uplink_pw "$UPLINK_PW"
+# BUG FOUND AND FIXED (found via code review, verified by trace): unlike
+# last_clone_pw right above (set UNCONDITIONALLY, even to "", so switching
+# the clone from WPA2 to open correctly clears the saved password), these
+# two were only cfg_set when non-empty. Trigger: run 1 uses --uplink wifi
+# with a password (last_uplink_pw="X" gets saved); run 2 switches to a
+# DIFFERENT, OPEN uplink network (UPLINK_SSID="NewOpenNet", UPLINK_PW="") -
+# last_uplink_ssid correctly updates to "NewOpenNet" (non-empty), but
+# last_uplink_pw's `-n` guard skips the write, leaving the STALE "X" from
+# run 1 paired with the NEW ssid. The next `EvilTwin.sh --on` then restores
+# UPLINK_SSID="NewOpenNet"/UPLINK_PW="X" and setup_uplink's `[ -n
+# "$UPLINK_PW" ]` check takes the WPA branch for a network that's actually
+# open, so WIFI_CONNECT fails all four encryption types and --on dies with
+# a confusing "check the password" error despite the password being
+# correct (there never was one). Gating on RESOLVED_UPLINK_MODE="wifi"
+# (set unconditionally by setup_uplink, already relied on a few lines above
+# for the same-radio health check) instead of on each var's own emptiness:
+# when this run actually used a WiFi uplink, save both current values
+# as-is (including a legitimately empty password for an open network,
+# clearing any stale one); when it used eth (both vars empty/unused this
+# run), leave any previously-saved WiFi uplink creds untouched exactly as
+# before, so switching to eth and back to wifi doesn't lose them either.
+if [ "$RESOLVED_UPLINK_MODE" = "wifi" ]; then
+    cfg_set last_uplink_ssid "$UPLINK_SSID"
+    cfg_set last_uplink_pw "$UPLINK_PW"
+fi
 
 if [ "$SCOPE_FILTER" = "1" ]; then
     say "Scoping PineAP network filter to '$CLONED_SSID' only (allow mode)."

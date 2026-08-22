@@ -56,8 +56,13 @@ fi
 
 if [ "$DO_CLEAR" = "1" ]; then
     confirm "Wipe the Open AP configuration entirely?" || die "Aborted."
-    WIFI_OPEN_AP_CLEAR wlan0open
-    say "Cleared."
+    # BUG FOUND AND FIXED (found via code review - a residual instance of
+    # this exact file's own already-fixed bug class: the comment a few
+    # lines below documents --off/--hide being fixed for "printed a success
+    # message unconditionally regardless of whether ... actually
+    # succeeded", but that fix never reached this --clear branch, which
+    # still printed "Cleared." even if WIFI_OPEN_AP_CLEAR failed).
+    WIFI_OPEN_AP_CLEAR wlan0open && say "Cleared." || die "Failed to clear the Open AP configuration."
     exit 0
 fi
 

@@ -38,9 +38,31 @@ validate_channel() { case "$1" in ''|*[!0-9]*) die "'$1' doesn't look like a cha
 validate_time() { [ -n "$1" ] && case "$1" in *[!0-9]*) die "'$1' doesn't look like a whole number of seconds." ;; esac; }
 validate_bssid() { is_valid_mac "$1" || die "'$1' doesn't look like a valid BSSID (expected AA:BB:CC:DD:EE:FF)."; }
 
+# BUG FOUND AND FIXED (found via code review): this is examine.sh's own
+# direct wrapper around PINEAPPLE_EXAMINE_RESET - the exact command this
+# codebase has ALREADY documented, elsewhere, as able to transiently stall
+# for several seconds under real device load (reset.sh's reset_wifi(),
+# confirmed live: a genuine `reset.sh --all` run hit a real timeout here
+# even with network contention ruled out, re-diagnosed via /proc/loadavg
+# showing a real decaying load spike - see reset.sh's own header for the
+# full incident). reset.sh's fix was `timeout 15` plus one retry after a
+# short pause before reporting real failure, specifically because a single
+# try with no margin proved too brittle on this modest embedded hardware.
+# This file - the one that actually OWNS this command, being what deauth.sh
+# and reset.sh both call out BY NAME as examine.sh's own wrapper - had NONE
+# of that: no timeout (a stall here would hang the whole script, and since
+# this is explicitly SSH-driven, the whole session), no retry, and no
+# success/failure check at all (printed "Resumed normal channel hopping."
+# unconditionally). Mirrored reset.sh's own established fix exactly instead
+# of inventing a new margin.
 if [ "$DO_RESET" = "1" ]; then
-    PINEAPPLE_EXAMINE_RESET
-    say "Resumed normal channel hopping."
+    if timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; then
+        say "Resumed normal channel hopping."
+    elif { sleep 1; timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; }; then
+        say "Resumed normal channel hopping (needed a retry - the first attempt hit transient contention)."
+    else
+        die "PINEAPPLE_EXAMINE_RESET failed or timed out twice - channel hopping may still be locked."
+    fi
     exit 0
 fi
 
@@ -80,5 +102,16 @@ c=$(ask "Choose" "3")
 case "$c" in
     1) b=$(ask "AP BSSID" ""); validate_bssid "$b"; t=$(ask "Lock time in seconds (blank = until reset)" ""); validate_time "$t"; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_BSSID "$b" "$t"; else PINEAPPLE_EXAMINE_BSSID "$b"; fi ;;
     2) ch=$(ask "Channel number" ""); validate_channel "$ch"; t=$(ask "Lock time in seconds (blank = until reset)" ""); validate_time "$t"; if [ -n "$t" ]; then PINEAPPLE_EXAMINE_CHANNEL "$ch" "$t"; else PINEAPPLE_EXAMINE_CHANNEL "$ch"; fi ;;
-    *) PINEAPPLE_EXAMINE_RESET ;;
+    # CONSISTENCY FIX (found via code review - same timeout+retry gap just
+    # fixed for --reset above, missed here in the interactive menu's
+    # equivalent "3) Resume normal hopping" choice).
+    *)
+        if timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; then
+            say "Resumed normal channel hopping."
+        elif { sleep 1; timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; }; then
+            say "Resumed normal channel hopping (needed a retry - the first attempt hit transient contention)."
+        else
+            err "PINEAPPLE_EXAMINE_RESET failed or timed out twice - channel hopping may still be locked."
+        fi
+        ;;
 esac
