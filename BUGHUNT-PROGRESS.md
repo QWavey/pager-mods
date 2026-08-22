@@ -163,6 +163,47 @@ that errored.
     reverting it without confirmation risks re-introducing that exact
     complaint.
 
+## Second live incident (follow-up report: still no packet spam, no save-log prompt)
+
+20. sniff.sh: `--summary` with an empty value (now distinguishable from
+    "flag never given" via a new SUMMARY_FLAG_GIVEN tracking var) now
+    fails loudly instead of silently falling through into an unrelated,
+    non-interactive-hostile capture/interactive code path.
+21. lan_sniffer payload: run_live_capture() now checks its own sniff.sh
+    launch actually succeeded (exit code AND a real CAPTURE_FILE) before
+    entering the wait loop or calling --summary - both call sites updated
+    to skip the summary/save-log/ALERT steps entirely on a failed launch.
+22. sniff.sh: added one retry (after a short pause) to the interface-
+    existence check - live evidence this session shows real, recurring
+    transient contention on this device, which could misreport a
+    genuinely-existing interface (like a freshly-created br-sniff) as
+    missing.
+23. **CRITICAL, self-introduced regression, caught via live verification of
+    my own earlier fix**: item 13's pid_running() hardening used
+    "sniff.sh" as the NAME_PATTERN for sniff.sh's own is_running() - but
+    sniff.sh's run_capture_bg() is a documented special case (like
+    webui.sh) that `exec`s directly into tcpdump/timeout, so the real
+    backgrounded process's /proc/PID/cmdline NEVER contains "sniff.sh".
+    This made is_running() always return false for a capture that was
+    genuinely running fine - confirmed live: a real --background capture
+    wrote a full, valid, non-empty .pcap file while sniff.sh reported
+    "Capture exited immediately" and `--status` said "Not running" the
+    whole time. This broke EVERY background sniff.sh capture's liveness
+    reporting (GUI, payloads, CLI alike) - almost certainly the dominant
+    real cause of "not spamming with IPs" (the launch was being reported
+    as failed, so the payload's own now-added check would abort before
+    ever showing the live view). Fixed by using "tcpdump" as the pattern.
+    Systematically re-checked all 9 pid_running() call sites for the same
+    class of mistake afterward and found one more:
+24. tracer.sh: identical bug, identical fix - run_trace() also execs
+    directly into tcpdump for both foreground and background, so
+    "tracer.sh" was never the right NAME_PATTERN there either.
+    Both fixes live-verified end-to-end on the device: a real background
+    capture now correctly reports "Started (PID ...)", `--status` shows
+    "Capture running" while active and "Not running" once the duration
+    elapses, and `--summary` against the resulting real .pcap file
+    produced a correct report (274 packets, real source IPs/protocols).
+
 ## User-directed follow-up work (post full-coverage checkpoint)
 
 The user asked for two specific things after the checkpoint below: (1)
