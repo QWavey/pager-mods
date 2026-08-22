@@ -86,6 +86,34 @@ resolve_python3() {
     return 1
 }
 
+# ip_link ARGS... - every "ip link" call anywhere in this toolkit that
+# touches an interface's master/state now goes through a timeout-guarded
+# wrapper, because a live incident this session was traced to exactly this:
+# a plain `ip link set eth0 master br-lan` wedged indefinitely on a confused
+# netlink socket and took SSH-over-USB-C management down with it (see
+# reset.sh's own header for the full incident). Until now every script that
+# needed this guarantee reimplemented it independently - sniff.sh had its own
+# local `ip_link()` wrapper, reset.sh repeated the same `timeout N ip link
+# ...` inline at every call site - two copies of a safety-critical pattern
+# that could silently drift out of sync (a new call site added to one file
+# without remembering the wrapper is exactly how the original incident-class
+# bug reappears). BIG CHANGE: pulled into ONE canonical implementation here
+# so every current and future caller gets the same guarantee, and the
+# timeout is tunable in exactly one place instead of N.
+IP_LINK_TIMEOUT="${PAGER_IP_LINK_TIMEOUT:-5}"
+ip_link() { timeout "$IP_LINK_TIMEOUT" ip link "$@"; }
+
+# pid_running PIDFILE - is the process recorded in PIDFILE still alive? The
+# exact same "does this pidfile point at a live process" check was
+# duplicated, byte-for-byte, as each script's own local is_running() in both
+# deauth.sh and sniff.sh (and would very likely be copy-pasted a third time
+# into the next script that needs background-process tracking). Centralized
+# here - a script's own is_running() can now just be `pid_running "$PIDFILE"`
+# instead of restating the `[ -f ... ] && kill -0 "$(cat ...)"` pattern
+# itself, with the actual stale-PID/kill-0 semantics defined in exactly one
+# place.
+pid_running() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
+
 # is_valid_mac MAC - does this look like a real xx:xx:xx:xx:xx:xx MAC
 # address? Catches typos early with a clear error instead of a command
 # silently doing nothing (or a sqlite3 query silently matching zero rows)
