@@ -268,8 +268,19 @@ summarize_pcap() {
     if [ "${size:-0}" -gt 20971520 ] 2>/dev/null; then
         say "Capture is $((size / 1024 / 1024))MB - summarizing may take a while and use real memory on this device, please wait..."
     fi
-    NN_DUMP=$(timeout 90 tcpdump -nn -r "$file" 2>/dev/null)
-    A_DUMP=$(timeout 90 tcpdump -A -r "$file" 2>/dev/null)
+    NN_DUMP=$(timeout 90 tcpdump -nn -r "$file" 2>/dev/null); local nn_rc=$?
+    A_DUMP=$(timeout 90 tcpdump -A -r "$file" 2>/dev/null); local a_rc=$?
+    # BUG FOUND AND FIXED (same silent-truncation class as run_creds_
+    # watcher's own fix, applied here too - this is the FINAL, most-relied-
+    # on report for a whole capture, so a quietly incomplete one is worse
+    # than a slow one): both calls are direct (non-piped) command
+    # substitutions, so $? right after each one is that specific timeout's
+    # own exit code, not something absorbed by a later pipeline stage. 124
+    # means genuinely cut off at 90s, not just "a smaller-than-expected but
+    # complete" capture.
+    if [ "$nn_rc" -eq 124 ] || [ "$a_rc" -eq 124 ]; then
+        err "This summary was cut off after 90s (an unusually large capture for this device) - the numbers below only cover what was scanned before the cutoff, not the whole file. The raw .pcap itself is complete and untouched; review it directly (e.g. download and open in Wireshark) for the full picture."
+    fi
     # grep -c . (not `wc -l`) to count lines in an already-captured
     # variable: command substitution strips ALL trailing newlines, so
     # `echo "$var" | wc -l` would misreport an empty capture as 1 line
@@ -578,7 +589,30 @@ run_creds_watcher() {
 
         local dumpf="/tmp/pager-sniff-watcher-dump.$$"
         timeout 15 tcpdump -A -r "$file" 2>/dev/null > "$dumpf"
-        [ -s "$dumpf" ] || { rm -f "$dumpf"; continue; }
+        # BUG FOUND AND FIXED (caught reviewing this same session's own
+        # timeout-wrapping fix, before it ever shipped): wrapping a command
+        # in `timeout` bounds the worst-case DELAY, but a command that
+        # actually GETS killed at the deadline produces a silently PARTIAL
+        # result, not an error - `[ -s "$dumpf" ]` alone can't tell "a
+        # complete, quick dump" apart from "a truncated dump that just
+        # happened to have SOME bytes before being killed". Piping the
+        # timeout'd command straight into `| cut | sort` (as first written)
+        # makes this worse: without `pipefail`, the pipeline's own exit
+        # status comes from the LAST command (`sort`), which succeeds
+        # regardless of whether the FIRST command got killed - so nothing
+        # downstream would ever know a scan was incomplete. For a
+        # credential/HTTP watcher, silently under-reporting real hits is a
+        # worse failure than being slow. Capturing `timeout`'s own exit
+        # code (124 specifically means "killed by the deadline") right
+        # after each call, before any further piping, and saying so
+        # plainly when it happens.
+        local tcpdump_rc=$?
+        if [ -s "$dumpf" ] && [ "$tcpdump_rc" -eq 124 ]; then
+            echo "[sniff.sh] NOTE: this cycle's re-scan was cut off after 15s (busy capture) - results below may be incomplete for this cycle; a full, complete pass still happens at the end via --summary."
+        elif [ ! -s "$dumpf" ]; then
+            rm -f "$dumpf"
+            continue
+        fi
 
         # BUG FOUND AND FIXED (live-caught while verifying this version):
         # busybox grep, for a single line that matches MULTIPLE
@@ -597,9 +631,17 @@ run_creds_watcher() {
         # under the MAX_LIVE_WATCH_BYTES cap above, but denser than that
         # measurement) could still run long - bounding it directly caps the
         # worst-case delay before this subshell can next notice a --stop.
+        # Same silent-truncation risk as the tcpdump call above applies
+        # here too - the raw grep call's own exit code is captured BEFORE
+        # piping into cut/sort, not read off the end of that pipeline.
+        local creds_raw http_raw creds_rc http_rc
         local creds_lines http_lines creds_count http_count
-        creds_lines=$(timeout 15 grep -noiE "$CREDS_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
-        http_lines=$(timeout 15 grep -noiE "$HTTP_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
+        creds_raw=$(timeout 15 grep -noiE "$CREDS_PATTERN" "$dumpf"); creds_rc=$?
+        [ "$creds_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's credential scan was cut off after 15s (busy capture) - may be incomplete for this cycle."
+        http_raw=$(timeout 15 grep -noiE "$HTTP_PATTERN" "$dumpf"); http_rc=$?
+        [ "$http_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's HTTP scan was cut off after 15s (busy capture) - may be incomplete for this cycle."
+        creds_lines=$(echo "$creds_raw" | cut -d: -f1 | sort -un)
+        http_lines=$(echo "$http_raw" | cut -d: -f1 | sort -un)
         creds_count=$(echo -n "$creds_lines" | grep -c .)
         http_count=$(echo -n "$http_lines" | grep -c .)
 
@@ -687,9 +729,16 @@ run_packet_feed() {
             return 0
         fi
 
-        local lines count new
-        lines=$(timeout 10 tcpdump -nn -r "$file" 2>/dev/null)
+        local lines count new lines_rc
+        lines=$(timeout 10 tcpdump -nn -r "$file" 2>/dev/null); lines_rc=$?
         [ -z "$lines" ] && continue
+        # BUG FOUND AND FIXED (same class as run_creds_watcher's own fix,
+        # applied here too): timeout's exit code is captured immediately
+        # after the direct (non-piped) command substitution above, so 124
+        # specifically means "cut off at 10s, this cycle's feed may be
+        # incomplete" rather than silently treating a truncated decode as
+        # a complete one.
+        [ "$lines_rc" -eq 124 ] && echo "-- (this cycle's feed was cut off after 10s, busy capture) --"
         count=$(echo "$lines" | grep -c .)
         if [ "$count" -gt "$last_count" ]; then
             new=$(echo "$lines" | tail -n "+$((last_count + 1))")
