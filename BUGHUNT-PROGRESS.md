@@ -55,6 +55,20 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
 - payloads/general/pc_link_recon, custom_lan_scan (fresh re-read)
 - scripts/LanScan.sh (rest of file, beyond the ip_link fix above)
 
+8. wigle.sh: CLI --login had no success/failure check at all (unlike its
+   own interactive-menu counterpart); interactive choice 5 (upload) also
+   discarded WIGLE_UPLOAD's real exit code silently.
+9. app.js (Control Panel): reconNew/openOn/openOff/mgmtOn/mgmtOff never
+   passed "-y" to scripts whose actions are gated behind confirm() (added
+   earlier this session for reconsession.sh --new, and pre-existing for
+   openap.sh --off / mgmt.sh --on+--off). server.py's subprocess.run()
+   doesn't redirect the child's stdin, so confirm()'s `read` either hits
+   immediate EOF (ASSUME_YES unset -> "Aborted.") or blocks until the
+   action's own request timeout - these five Control Panel buttons could
+   never actually complete. Fixed by adding "-y" plus a matching
+   confirmAuthorized() JS-side gate for the two/four that are actually
+   consequential (openOn doesn't need one).
+
 ## Improvement-shaped ideas parked (not acted on here - see /quick-map output)
 
 (filled in if any surface)
