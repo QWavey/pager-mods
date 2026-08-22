@@ -357,12 +357,6 @@ summarize_pcap() {
     echo
 }
 
-# HTTP request-line / Host-header pattern - shared with summarize_pcap's
-# own "HTTP Host headers seen" section, same reasoning as CREDS_PATTERN
-# above (one definition, no drift between the live watcher and the
-# end-of-capture summary).
-HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
-
 # run_creds_watcher OUTPUT_FILE - INVENTED FEATURE: summarize_pcap only
 # ever scanned for credentials/HTTP activity AFTER the whole capture
 # finished - fine for a quick 30s capture, but for a long --background
@@ -371,22 +365,32 @@ HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
 # remaining capture is an avoidable gap, and it's the opposite of the
 # "watch it happen live, Wireshark-style" experience this was built for.
 # This periodically (every 5s) re-scans the growing capture file and
-# prints any NEW credential hit (red) or HTTP request/Host line the
-# moment it's seen - live, into whatever the capture's own live output is
-# (the terminal in the foreground case, /tmp/pager-sniff.log in the
+# prints any NEW credential hit (red) or HTTP request the moment it's
+# seen - live, into whatever the capture's own live output is (the
+# terminal in the foreground case, /tmp/pager-sniff.log in the
 # --background case, which is also what the LAN Sniffer payload's
-# on-device live scroller already tails). Tracks each pattern's own seen-
-# count separately so neither re-alerts the same match every cycle.
+# on-device live scroller already tails).
 #
-# MEASURED AND CHANGED: this used to be two separate functions (one for
-# creds, one originally planned as a separate url-watcher) - each doing
-# its OWN full `tcpdump -A -r file` re-read of the whole capture every
-# cycle. Re-reading a growing file from the start twice per cycle instead
-# of once doubles real CPU work for no benefit on a device that's already
-# memory/CPU-constrained (251MB RAM total, confirmed live) - merged into
-# one pass that checks both patterns from a SINGLE read per cycle.
+# BUG FOUND AND FIXED (reported live, twice - "no contacted urls or in
+# red http logins found or displayed", later "really spammy with ip addr
+# which are contacting urls with an arrow ... but for some reason it
+# doesn't display it"): the old version just grepped raw HTTP header/
+# request lines and creds-pattern lines with NO association back to
+# who/what they belonged to - a bare "[HTTP] GET /login HTTP/1.1" line
+# with no source IP or destination host isn't the "IP -> URL, like
+# bettercap/Wireshark" view that was actually asked for, twice. tcpdump
+# -A's own output is one block per packet, each starting with its own
+# "SRC.port > DST.port:" header line - the awk pass below groups by that
+# (verified live against a real capture on this device: correctly paired
+# a GET request with its Host: header and the packet's own source IP)
+# so every hit can be tagged with WHO said it and WHAT it was talking to,
+# same idea as summarize_pcap's own "Top source IPs"/"HTTP Host headers"
+# sections, just applied live instead of only after the capture finishes.
+# Still one single `tcpdump -A -r` read per cycle (not two), same
+# performance reasoning as before - now one awk pass over that one read
+# does both the creds AND the HTTP-with-host job at once.
 run_creds_watcher() {
-    local file="$1" last_creds=0 last_http=0 last_size=-1
+    local file="$1" last_size=-1 last_seen=0
     # is_running (PIDFILE-based) covers --background; for a foreground
     # run there's no PIDFILE, so fall back to "is the sniff.sh process
     # that launched me ($PPID, since this runs as its backgrounded child)
@@ -408,29 +412,50 @@ run_creds_watcher() {
         cur_size=$(wc -c < "$file" 2>/dev/null)
         [ "$cur_size" = "$last_size" ] && continue
         last_size="$cur_size"
-        local dump creds_hits http_hits count new
-        dump=$(tcpdump -A -r "$file" 2>/dev/null)
-        [ -z "$dump" ] && continue
 
-        creds_hits=$(echo "$dump" | grep -iE "$CREDS_PATTERN")
-        if [ -n "$creds_hits" ]; then
-            count=$(echo "$creds_hits" | grep -c .)
-            if [ "$count" -gt "$last_creds" ]; then
-                new=$(echo "$creds_hits" | tail -n "+$((last_creds + 1))")
-                echo "$new" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN" | sed 's/^/[CREDS FOUND] /'
-                last_creds="$count"
+        local rows count new
+        # One block (= one packet) per iteration: track that block's
+        # source IP, Host: header, first request line, and first creds
+        # match, then emit ONE tagged row for it (creds win over a plain
+        # HTTP row if both are present in the same packet - e.g. a GET
+        # with the password right in the query string) the moment the
+        # NEXT packet's header line starts (or at EOF). IGNORECASE=1 is a
+        # real busybox awk feature (confirmed live on this device, not a
+        # GNU-only assumption) - same case-insensitivity as the old
+        # `grep -i` without needing to lowercase everything by hand.
+        rows=$(tcpdump -A -r "$file" 2>/dev/null | awk -v credspat="$CREDS_PATTERN" '
+            BEGIN { IGNORECASE = 1 }
+            function flush_block() {
+                if (creds != "") print "CREDS\t" src "\t" (host == "" ? "?" : host) "\t" creds
+                else if (req != "" || host != "") print "HTTP\t" src "\t" (host == "" ? "?" : host) "\t" req
+            }
+            /^[0-9]+:[0-9]+:[0-9]+\./ {
+                flush_block()
+                src = "?"
+                for (i = 1; i <= NF; i++) {
+                    if ($i == ">") { src = $(i - 1); sub(/\.[0-9]+$/, "", src); break }
+                }
+                host = ""; req = ""; creds = ""
+                next
+            }
+            /^[Hh]ost: / { host = $2; gsub(/\r/, "", host); next }
+            /^(GET|POST|PUT|DELETE|HEAD) \// { if (req == "") { req = $0; gsub(/\r/, "", req) } }
+            $0 ~ credspat { if (creds == "") { creds = $0; gsub(/\r/, "", creds) } }
+            END { flush_block() }
+        ')
+        [ -z "$rows" ] && continue
+        count=$(echo "$rows" | grep -c .)
+        [ "$count" -le "$last_seen" ] && continue
+        new=$(echo "$rows" | tail -n "+$((last_seen + 1))")
+        last_seen="$count"
+        echo "$new" | while IFS="$(printf '\t')" read -r kind src host content; do
+            if [ "$kind" = "CREDS" ]; then
+                printf '[CREDS FOUND] %s -> %s  ' "$src" "$host"
+                echo "$content" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN"
+            else
+                echo "[HTTP] $src -> $host  $content"
             fi
-        fi
-
-        http_hits=$(echo "$dump" | grep -iE "$HTTP_PATTERN")
-        if [ -n "$http_hits" ]; then
-            count=$(echo "$http_hits" | grep -c .)
-            if [ "$count" -gt "$last_http" ]; then
-                new=$(echo "$http_hits" | tail -n "+$((last_http + 1))")
-                echo "$new" | sed 's/^/[HTTP] /'
-                last_http="$count"
-            fi
-        fi
+        done
     done
 }
 
@@ -874,11 +899,30 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
 fi
 
 if [ "$DO_BRIDGE" = "1" ]; then
-    say "This bridges $BR_IFACE1 and $BR_IFACE2 into a transparent tap ($BRIDGE_NAME)."
-    say "Traffic will actually flow through the Pager between whatever's on each end."
+    # BRIDGE_PROGRESS_FILE - INVENTED FEATURE (asked for directly - "give
+    # more info on the display while setting up"): a caller that captures
+    # this whole command via `$(...)` (the LAN Sniffer payload does, so it
+    # can check the exit code) sees NOTHING printed here until the ENTIRE
+    # --bridge call returns - every `say` below is just as invisible mid-
+    # flight as raw stdout always is inside a command substitution. This
+    # plain, append-only file mirrors every step-progress message as it
+    # happens, so a caller that wants live feedback can tail it (same idea
+    # as /tmp/pager-sniff.log for an in-progress capture) WHILE this call
+    # is still running instead of only after it returns - see the LAN
+    # Sniffer payload's own bridge_progress_bar() for the reader side.
+    BRIDGE_PROGRESS_FILE="/tmp/pager-sniff-bridge-progress.log"
+    : >"$BRIDGE_PROGRESS_FILE" 2>/dev/null
+    bridge_progress() {
+        local _msg="[$TOOL_NAME] $1"
+        echo "$_msg"
+        echo "$_msg" >>"$BRIDGE_PROGRESS_FILE" 2>/dev/null
+    }
+
+    bridge_progress "This bridges $BR_IFACE1 and $BR_IFACE2 into a transparent tap ($BRIDGE_NAME). Traffic will actually flow through the Pager between whatever's on each end."
     check_adapters || err "Continuing anyway since you gave explicit interface names - but see the check above."
     confirm "Proceed?" || die "Aborted."
 
+    bridge_progress "Checking $BR_IFACE1 and $BR_IFACE2 exist..."
     for i in "$BR_IFACE1" "$BR_IFACE2"; do
         if ! ip_link show "$i" >/dev/null 2>&1; then
             # DIAGNOSTIC (added after this exact error was reported live,
@@ -897,7 +941,7 @@ if [ "$DO_BRIDGE" = "1" ]; then
     done
 
     if ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-        say "$BRIDGE_NAME already exists - tearing it down first."
+        bridge_progress "$BRIDGE_NAME already exists - tearing it down first."
         ip_link set "$BRIDGE_NAME" down 2>/dev/null
         ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
     fi
@@ -924,8 +968,11 @@ if [ "$DO_BRIDGE" = "1" ]; then
         ip_link set eth0 up 2>/dev/null
     ' EXIT
 
+    bridge_progress "Creating bridge device $BRIDGE_NAME..."
     ip_link add name "$BRIDGE_NAME" type bridge || die "Failed to create bridge (or the call timed out - network stack may be unresponsive; eth0 has been restored to br-lan)."
+    bridge_progress "Attaching $BR_IFACE1 to $BRIDGE_NAME..."
     ip_link set "$BR_IFACE1" master "$BRIDGE_NAME" || die "Failed to attach $BR_IFACE1 (or the call timed out; eth0 has been restored to br-lan)."
+    bridge_progress "Attaching $BR_IFACE2 to $BRIDGE_NAME..."
     ip_link set "$BR_IFACE2" master "$BRIDGE_NAME" || die "Failed to attach $BR_IFACE2 (or the call timed out; eth0 has been restored to br-lan)."
     # BUG FOUND AND FIXED (live-diagnosed - this is very likely why --dhcp's
     # own lease worked (confirmed live: real DHCP lease obtained, ARP
@@ -945,15 +992,17 @@ if [ "$DO_BRIDGE" = "1" ]; then
     # they join the bridge (standard Linux bridging practice - a bridge
     # slave should never carry its own address once enslaved) removes the
     # ambiguity regardless of whether --dhcp is even used.
+    bridge_progress "Clearing old addresses from both bridge members (standard practice once enslaved)..."
     timeout "$IP_LINK_TIMEOUT" ip addr flush dev "$BR_IFACE1" 2>/dev/null
     timeout "$IP_LINK_TIMEOUT" ip addr flush dev "$BR_IFACE2" 2>/dev/null
     ip_link set "$BR_IFACE1" up
     ip_link set "$BR_IFACE2" up
+    bridge_progress "Bringing $BRIDGE_NAME up..."
     ip_link set "$BRIDGE_NAME" up
 
     trap - EXIT
 
-    say "Bridge $BRIDGE_NAME is up ($BR_IFACE1 <-> $BR_IFACE2)."
+    bridge_progress "Bridge $BRIDGE_NAME is up ($BR_IFACE1 <-> $BR_IFACE2)."
     say "Sniff everything passing through with: sniff.sh --iface $BRIDGE_NAME"
     say "Tear it down later with: sniff.sh --unbridge"
     # KNOWN LIMITATION (tried and reverted - see README.md's postmortem

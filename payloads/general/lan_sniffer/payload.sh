@@ -2,7 +2,7 @@
 # Title: LAN Sniffer
 # Author: florian
 # Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - full internet access stays intact) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
-# Version: 3.2
+# Version: 3.3
 #
 # This is a general-payload wrapper around sniff.sh's own capture pipeline
 # (nothing new re-implemented here). There was no dedicated Payloads-menu
@@ -16,22 +16,29 @@
 # captured everything via `__out=$(sniff.sh ... 2>&1)` - a single blocking
 # command substitution that shows NOTHING until the ENTIRE capture (and
 # its post-capture summary) finishes - looked exactly like a hang. v2.0
-# fixed that with a background capture + live-tailed log. v3.0 (this
-# version) fixes three more real reports:
+# fixed that with a background capture + live-tailed log. v3.0 fixed three
+# more real reports (bridge/tap wording, an orphaned bridge on a cancelled
+# dialog, and a fixed-timer-only duration picker). v3.3 (this version)
+# fixes three more, all reported live against this exact device:
 #
-#   1. "Bridge/tap" sounded like it might interrupt the PC's own internet
-#      access - it doesn't (a Linux bridge with both ports up forwards
-#      traffic exactly like an unmanaged switch would), but the wording
-#      never SAID that plainly. Now says so explicitly, twice (the picker
-#      description and the confirmation dialog).
-#   2. The bridge (br-sniff) could be left up if anything went wrong
-#      between bridging and the explicit --unbridge call later in the
-#      script (a cancelled dialog, an error) - reported as "it stays like
-#      that". Fixed with a real `trap ... EXIT` right after bridging, so
-#      teardown happens no matter how/where the script exits from that
-#      point on, not just on the one success path that used to call it.
-#   3. Only a fixed timer was offered - now you can pick Timer (enter
-#      seconds, as before) or Infinite (runs until you stop it with B).
+#   1. The bridge setup itself was still one big blocking command
+#      substitution - nothing printed inside it reached the screen until
+#      the WHOLE call returned, leaving one static line on screen the
+#      entire time ("it just stayed here"). Now runs in the background
+#      while this payload tails sniff.sh's own live bridge-progress file
+#      and renders a reset.sh-style [#####-----] progress bar as each real
+#      setup step lands.
+#   2. The --dhcp option (get SSH back on the tapped LAN without a reset
+#      afterward) is removed from this flow - its own client-side
+#      auto-renew mechanism was found unsafe and reverted (see
+#      README.md's postmortem), and without it the option had no visible
+#      payoff from here. sniff.sh --bridge --dhcp is still there directly
+#      if this gets revisited later.
+#   3. sniff.sh's own live watcher (run_creds_watcher) used to tag raw
+#      HTTP/creds lines with no source or destination context - not the
+#      "IP -> URL, like bettercap/Wireshark" view actually asked for.
+#      Fixed there to pair every hit with the packet's own source IP and
+#      (when present) the HTTP Host header it was headed to.
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -40,10 +47,11 @@
 # stops, shows the summary, then asks whether to save the full log.
 #
 # "Wireshark-like" live content: sniff.sh's own live watcher (see its
-# run_creds_watcher) now surfaces HTTP requests/Host headers and
-# credential hits AS THEY'RE SEEN, tagged [HTTP]/[CREDS FOUND], into the
-# same live-scrolling log this payload tails - not just raw per-packet
-# header lines, and not only in the end-of-capture summary.
+# run_creds_watcher) surfaces HTTP requests (tagged [HTTP], as
+# "SRC_IP -> HOST  METHOD PATH") and credential hits (tagged
+# [CREDS FOUND], matched text highlighted red over SSH) AS THEY'RE SEEN,
+# into the same live-scrolling log this payload tails - not just raw
+# per-packet header lines, and not only in the end-of-capture summary.
 #
 # HONEST LIMITATION: `WAIT_FOR_INPUT`/`WAIT_FOR_BUTTON_PRESS` are the only
 # documented ways to react to a button press, and both BLOCK until
@@ -78,6 +86,28 @@ usb_a_iface() {
 }
 
 iface_up() { [ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null)" = "1" ]; }
+
+# bridge_progress_bar CUR TOTAL - same visual style as reset.sh's own
+# progress_bar() (a 20-char [#####-----] bar + percent), reused here
+# (asked for directly - "do a 5 bar the same we have in reset") so the
+# bridge setup below gives the same familiar feedback instead of a
+# different, unfamiliar indicator. CUR isn't bound to TOTAL (some setup
+# steps are conditional, e.g. "bridge already exists"), so this caps at
+# 100% rather than showing something like "140%" if more steps land than
+# the nominal count.
+bridge_progress_bar() {
+    local cur="$1" total="$2" pct filled bar i
+    pct=$(( cur * 100 / total ))
+    [ "$pct" -gt 100 ] && pct=100
+    filled=$(( pct / 5 ))
+    bar=""
+    i=0
+    while [ "$i" -lt 20 ]; do
+        if [ "$i" -lt "$filled" ]; then bar="${bar}#"; else bar="${bar}-"; fi
+        i=$((i + 1))
+    done
+    echo "[$bar] ${pct}%"
+}
 
 # pick_duration - Timer (a number of seconds, as before) or Infinite (runs
 # until you press B). Echoes the value to pass as sniff.sh's --duration -
@@ -274,45 +304,77 @@ case "$__mode" in
         ;;
 
     "Bridge/tap both adapters (keeps full internet access)")
+        LOG "Checking adapters (USB-C + USB-A)..."
         __a=$(usb_a_iface)
         if [ -z "$__a" ] || ! iface_up "$__a" || ! iface_up eth0; then
             ERROR_DIALOG "Bridge/tap needs BOTH USB-C and a connected USB-A adapter. Check 'Check adapter status' to see what's missing."
             exit 0
         fi
+        LOG "USB-C (eth0) and USB-A ($__a) both connected."
         if ! CONFIRMATION_DIALOG "Bridge eth0 <-> $__a? The PC keeps FULL internet access through the router the whole time - the Pager just sits transparently in the middle and watches a copy of the traffic, it doesn't interrupt anything. Proceed?"; then
             LOG "User cancelled."
             exit 0
         fi
-        # NEW FEATURE (asked for directly - "keep the sniffing while keeping
-        # ssh... over the LAN"): bridging eth0 normally means SSH-over-USB-C
-        # stops working for the whole session (eth0 leaves br-lan, which is
-        # what that management IP rides on) - see sniff.sh's own
-        # start_bridge_dhcp() for the real mechanism this uses to fix that.
-        __dhcp_args=()
-        if CONFIRMATION_DIALOG "Also try to get a real IP on this LAN via DHCP, so SSH stays reachable here too (no reset needed afterward)? Bridge/tap itself works either way - this is a bonus, not a requirement."; then
-            __dhcp_args=(--dhcp)
+        # REMOVED (asked for directly - "the dhcp doesnt work, remove it
+        # please"): this used to also offer --dhcp here (a real IP on the
+        # tapped LAN so SSH stays reachable without a reset afterward -
+        # see sniff.sh's own start_bridge_dhcp()). The Pager's own lease
+        # genuinely worked (confirmed live via /tmp/pager-sniff-dhcp.log),
+        # but nothing made that success visible from this payload, and the
+        # client-side auto-renew mechanism that would have made it useful
+        # end-to-end was reverted as unsafe (see README.md's postmortem -
+        # it risked a full USB re-enumeration, not just a link blip). Left
+        # out of this flow entirely for now rather than offering a feature
+        # whose benefit doesn't actually land; sniff.sh --bridge --dhcp is
+        # still there directly if this gets revisited later.
+        #
+        # BUG FOUND AND FIXED (reported live, twice - "it just stayed
+        # here", and separately "doesn't spam me with info" during this
+        # exact window): the bridge call used to be one big blocking
+        # command substitution - nothing printed inside it (sniff.sh's own
+        # step-by-step progress) ever reached the screen until the WHOLE
+        # call returned, so one static line sat on screen for the entire
+        # ~10s+ setup, indistinguishable from a hang. Fixed by running the
+        # bridge command in the background and tailing sniff.sh's own
+        # BRIDGE_PROGRESS_FILE (see its --bridge handler) while it runs,
+        # rendering a reset.sh-style progress bar as each real step lands.
+        LOG "Bridging $__a and eth0 now - this briefly touches the network stack, so expect a real pause between steps, not a hang."
+        __bridge_progress_file="/tmp/pager-sniff-bridge-progress.log"
+        rm -f "$__bridge_progress_file" /tmp/pager-sniff-bridge-out.log /tmp/pager-sniff-bridge-rc
+        # BUG FOUND AND FIXED (defense-in-depth, CRITICAL): sniff.sh's own
+        # `ip link` calls each carry a bounded timeout (see its `ip_link`
+        # wrapper), but this outer timeout is a backstop against ANY other
+        # unforeseen blocking condition inside sniff.sh --bridge (a wedged
+        # sysfs read in check_adapters, etc.). 60s comfortably exceeds the
+        # worst case of every internal 5s ip_link timeout firing in
+        # sequence (at most ~10 calls = 50s).
+        ( timeout 60 /root/scripts/sniff.sh --bridge eth0 "$__a" -y >/tmp/pager-sniff-bridge-out.log 2>&1
+          echo $? >/tmp/pager-sniff-bridge-rc ) &
+        __bridge_pid=$!
+        __bridge_last=0
+        __bridge_total=8
+        while kill -0 "$__bridge_pid" 2>/dev/null; do
+            sleep 1
+            __bridge_cur=$(wc -l < "$__bridge_progress_file" 2>/dev/null || echo 0)
+            if [ "$__bridge_cur" -gt "$__bridge_last" ] 2>/dev/null; then
+                tail -n "+$((__bridge_last + 1))" "$__bridge_progress_file" 2>/dev/null | while IFS= read -r __pl; do LOG "$__pl"; done
+                __bridge_last="$__bridge_cur"
+                LOG "$(bridge_progress_bar "$__bridge_last" "$__bridge_total")"
+            fi
+        done
+        wait "$__bridge_pid" 2>/dev/null
+        # Final catch-up: the loop above only notices new progress lines
+        # once per second, so whatever got written in the gap between the
+        # last check and the process actually exiting (almost always the
+        # final "Bridge is up" line) would otherwise never be shown - do
+        # one last read of anything not yet displayed before checking the
+        # result.
+        __bridge_cur=$(wc -l < "$__bridge_progress_file" 2>/dev/null || echo 0)
+        if [ "$__bridge_cur" -gt "$__bridge_last" ] 2>/dev/null; then
+            tail -n "+$((__bridge_last + 1))" "$__bridge_progress_file" 2>/dev/null | while IFS= read -r __pl; do LOG "$__pl"; done
+            __bridge_last="$__bridge_cur"
         fi
-        # BUG FOUND AND FIXED (reported live - "it just stayed here" showing
-        # nothing but the platform's own default launch splash, for the
-        # whole window between confirming and the bridge coming up): no
-        # LOG/ALERT call fired anywhere between the LIST_PICKER/
-        # CONFIRMATION_DIALOG above and the bridge call below - the on-
-        # screen log had genuinely nothing new to show for that entire
-        # stretch. Live-diagnosed via dmesg (uptime-correlated against the
-        # screenshot's own on-screen clock): the bridge itself actually DID
-        # come up successfully, in well under 10s (both ports reached
-        # "forwarding state") - the apparent hang is consistent with this
-        # session's OWN separately-confirmed finding that PINEAPPLE_EXAMINE_
-        # RESET can transiently stall for several seconds right around a
-        # network-topology change (bridging eth0 is exactly that) - the
-        # LOG/ALERT calls immediately AFTER the bridge call are just as
-        # exposed to that same local-daemon contention window as any other
-        # platform command is. This can't be eliminated from here (it's the
-        # platform's own IPC being busy, not this script's own logic), but
-        # showing real progress BEFORE the risky call at least means the
-        # user sees something change before that stall window starts,
-        # instead of the same static launch splash from the very beginning.
-        LOG "Confirmed - bridging $__a and eth0 now. This briefly touches the network stack, so the screen may pause for a few seconds before the next update - that's expected, not a hang."
+        __bridge_rc=$(cat /tmp/pager-sniff-bridge-rc 2>/dev/null); __bridge_rc=${__bridge_rc:-1}
         # BUG FOUND AND FIXED: this call's success/failure was never
         # checked - if bridging failed for any reason (ip link add/set
         # erroring, a rare race after the adapter checks above), the
@@ -322,38 +384,20 @@ case "$__mode" in
         # explanation why - looked exactly like a hang instead of the
         # clear ERROR_DIALOG this toolkit uses everywhere else for a real
         # failure.
-        # BUG FOUND AND FIXED (defense-in-depth, CRITICAL): this command
-        # substitution had no outer bound - sniff.sh's own `ip link` calls
-        # now each carry a bounded timeout (see sniff.sh's `ip_link`
-        # wrapper), but this outer timeout is a backstop against ANY other
-        # unforeseen blocking condition inside sniff.sh --bridge (a wedged
-        # sysfs read in check_adapters, etc.) that isn't one of those
-        # already-identified calls. Without it, a hang anywhere in there
-        # blocks this substitution forever, which is exactly what was
-        # reported live: the platform's own "Starting Lan Sniffer" splash
-        # never gets replaced because LOG/ERROR_DIALOG below never runs.
-        # 60s comfortably exceeds the worst case of every internal 5s
-        # ip_link timeout firing in sequence (at most ~10 calls = 50s).
-        # Widened to 90s when --dhcp is in play - start_bridge_dhcp() has
-        # its own internal ~20s bound for the DHCP negotiation itself, on
-        # top of the bridge setup this timeout was already sized for.
-        __bridge_timeout=60
-        [ "${#__dhcp_args[@]}" -gt 0 ] && __bridge_timeout=90
-        if ! __bridge_out=$(timeout "$__bridge_timeout" /root/scripts/sniff.sh --bridge eth0 "$__a" "${__dhcp_args[@]}" -y 2>&1); then
-            LOG "$__bridge_out"
+        if [ "$__bridge_rc" -ne 0 ]; then
+            LOG "$(cat /tmp/pager-sniff-bridge-out.log 2>/dev/null)"
             ERROR_DIALOG "Failed to create the bridge (or it timed out) - see log for details. eth0 should already be restored to br-lan by sniff.sh's own safety net."
             exit 1
         fi
-        LOG "$__bridge_out"
         # BUG FOUND AND FIXED (reported live): after a successful bridge,
-        # sniff.sh's own multi-line success output (5-6 lines) fills the
-        # visible log, then pick_duration() immediately calls LIST_PICKER -
-        # a real on-screen prompt waiting for a physical button press, but
-        # with nothing distinguishing "still working" from "waiting on
-        # you" after a wall of text just scrolled by. Looked exactly like
-        # a hang (confirmed live: the underlying bridge had actually
-        # already come up successfully - kernel logs showed both ports
-        # reach forwarding state - the payload was just sitting at an
+        # sniff.sh's own multi-line success output filled the visible log,
+        # then pick_duration() immediately calls LIST_PICKER - a real
+        # on-screen prompt waiting for a physical button press, but with
+        # nothing distinguishing "still working" from "waiting on you"
+        # after a wall of text just scrolled by. Looked exactly like a
+        # hang (confirmed live: the underlying bridge had actually already
+        # come up successfully - kernel logs showed both ports reach
+        # forwarding state - the payload was just sitting at an
         # unannounced prompt). A one-off ALERT here (not LOG, which could
         # stay buried in the scroll) makes the transition unmistakable.
         ALERT "Bridge is up - pick a capture duration next"
