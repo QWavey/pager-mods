@@ -398,18 +398,36 @@ case "$__mode" in
             ERROR_DIALOG "Failed to create the bridge (or it timed out) - see log for details. eth0 should already be restored to br-lan by sniff.sh's own safety net."
             exit 1
         fi
-        # BUG FOUND AND FIXED (reported live): after a successful bridge,
-        # sniff.sh's own multi-line success output filled the visible log,
-        # then pick_duration() immediately calls LIST_PICKER - a real
-        # on-screen prompt waiting for a physical button press, but with
-        # nothing distinguishing "still working" from "waiting on you"
-        # after a wall of text just scrolled by. Looked exactly like a
-        # hang (confirmed live: the underlying bridge had actually already
-        # come up successfully - kernel logs showed both ports reach
-        # forwarding state - the payload was just sitting at an
-        # unannounced prompt). A one-off ALERT here (not LOG, which could
-        # stay buried in the scroll) makes the transition unmistakable.
-        ALERT "Bridge is up - pick a capture duration next"
+        # BUG FOUND AND FIXED, TWICE (reported live both times - the exact
+        # wording changed but the report was the same: a "pick a
+        # time"-ish dialog appearing AFTER the Duration picker had already
+        # been answered, dismissible with a single A press). The original
+        # concern this ALERT solved was real (sniff.sh's own multi-line
+        # success output filled the screen, then pick_duration() calling
+        # LIST_PICKER right after looked exactly like a hang with nothing
+        # distinguishing "still working" from "waiting on you"). The FIRST
+        # fix attempt (a 1s settle pause before pick_duration(), removed
+        # below) assumed the problem was a stray button press leaking from
+        # the ALERT into the following LIST_PICKER - reported live as
+        # unfixed, still happening. Re-diagnosed: the report ("appears
+        # AFTER Infinite was already chosen, needs A to dismiss") matches
+        # ALERT's own single-dismiss behavior exactly, not NUMBER_PICKER -
+        # meaning the platform most likely QUEUES this ALERT and doesn't
+        # actually render it until AFTER the very next LIST_PICKER's own
+        # interaction finishes, regardless of any pause added beforehand -
+        # an ordering problem no amount of sleep() between the two calls
+        # can fix, since the ALERT was already queued before the sleep
+        # even started. Original justification for needing a hard,
+        # button-press-gated ALERT here is also weaker now than when it
+        # was added: the bridge setup already ends with a live progress
+        # bar reaching 100% and its own "Bridge is up" line (see the
+        # progress-bar fix above), which already makes "something just
+        # happened, look here" obvious without a second blocking modal
+        # that can be reordered. Removed the ALERT entirely rather than
+        # attempt a third guess at its timing; a plain LOG line (which
+        # doesn't need dismissing, so it can never appear stuck) keeps the
+        # log the same "bridge is up" wording either way.
+        LOG "Bridge is up - pick a capture duration next."
         # BUG FOUND AND FIXED: previously the ONLY --unbridge call was
         # after run_live_capture returned successfully - if anything
         # between here and there went wrong (a cancelled picker, an
@@ -425,14 +443,6 @@ case "$__mode" in
         # against anything else unforeseen, same reasoning as the --bridge
         # call above.
         trap 'timeout 30 /root/scripts/sniff.sh --unbridge -y >/dev/null 2>&1' EXIT
-        # HARDENING (see pick_duration's own note on the leftover-prompt
-        # report): a brief settle pause between the ALERT above and the
-        # very next on-screen prompt reduces the chance of a button press
-        # meant to dismiss the ALERT (or pressed impatiently during the
-        # progress bar just before it) leaking into LIST_PICKER's own
-        # first render. Cheap and harmless either way - not a confirmed
-        # fix, since the exact mechanism wasn't reproduced live.
-        sleep 1
         __dur=$(pick_duration) || exit 0
         # BUG FOUND AND FIXED: this never checked whether run_live_capture
         # actually got anywhere (see its own new liveness check) before
