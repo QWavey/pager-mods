@@ -831,8 +831,23 @@ fi
 
 [ -z "$IFACE" ] && IFACE="eth1"
 
+# BUG FOUND AND FIXED (live-diagnosed as the most likely root cause behind
+# a real device report: a LAN Sniffer bridge run that never actually
+# started its capture, traced to this exact check): a single ip_link()
+# call is still subject to its own timeout - on THIS device, real
+# transient contention has now been confirmed multiple times in one
+# session (PINEAPPLE_EXAMINE_RESET timing out twice in reset.sh, right
+# around this same incident). A transient stall here would misreport a
+# genuinely-existing interface (like a freshly-created br-sniff) as "does
+# not exist" and abort the whole capture launch - one retry after a short
+# pause, matching the same "transient vs genuinely missing" distinction
+# reset_wifi() and the br-sniff teardown retries already use elsewhere in
+# this toolkit.
 if ! ip_link show "$IFACE" >/dev/null 2>&1; then
-    die "Interface '$IFACE' does not exist. Use --list to see candidates, or --bridge to tap two NICs together."
+    sleep 1
+    if ! ip_link show "$IFACE" >/dev/null 2>&1; then
+        die "Interface '$IFACE' does not exist. Use --list to see candidates, or --bridge to tap two NICs together."
+    fi
 fi
 
 command -v tcpdump >/dev/null 2>&1 || die "tcpdump is not installed on this device."
