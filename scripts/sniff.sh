@@ -182,6 +182,21 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# BUG FOUND AND FIXED (found via code review): --duration and --count were
+# the two numeric CLI arguments in this whole toolkit with NO validation at
+# all - every other numeric flag elsewhere (deauth.sh's --channel/
+# --interval, bluetooth.sh's --duration/--burst/--scan-time/--size,
+# battery.sh's --interval, examine.sh's channel/time) rejects a non-numeric
+# value up front with a clear message. Here, a typo'd --duration/--count
+# was handed straight to `timeout "$DURATION" tcpdump ...` / `tcpdump -c
+# "$COUNT"` - `timeout`/`tcpdump` reject a garbage value themselves, but
+# with no check here that failure looks exactly like "a capture that
+# caught nothing" (an empty/missing .pcap, a bare "0 packets" summary)
+# instead of the immediate, specific "your --duration is wrong" this
+# toolkit's own convention would normally give.
+[ -n "$DURATION" ] && case "$DURATION" in *[!0-9]*) die "'--duration' needs a whole number of seconds (got '$DURATION')." ;; esac
+[ -n "$COUNT" ] && case "$COUNT" in *[!0-9]*) die "'--count' needs a whole number of packets (got '$COUNT')." ;; esac
+
 # Shared by summarize_pcap (end-of-capture scan) AND run_creds_watcher
 # (live, DURING-capture scan) - one definition so the two can't drift.
 # Covers HTTP Basic Auth, query-string logins, raw FTP/Telnet USER/PASS,
