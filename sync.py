@@ -149,6 +149,18 @@ def main():
     if not args.watch:
         return
 
+    # BUG FOUND AND FIXED: --force is documented as "first push ignores the
+    # incremental cache" (see this file's own --help text above), but
+    # `extra` (which --force got appended to, once, above) was being reused
+    # UNCHANGED for every subsequent --watch-triggered push too - meaning
+    # `sync.py --watch --force` forced a full re-upload on EVERY detected
+    # change forever, not just the first one, directly contradicting the
+    # documented behavior and defeating the whole performance point of
+    # --watch (avoiding needless full re-uploads on every little edit).
+    # Strip --force from the args used for watch-triggered pushes after the
+    # initial push has already happened once.
+    watch_extra = [a for a in extra if a != "--force"]
+
     print()
     print("Watching scripts/ and payloads/ for changes - Ctrl+C to stop.")
     last = snapshot(HERE)
@@ -183,7 +195,7 @@ def main():
                 # branch. Only adopt the new snapshot on a successful push -
                 # otherwise leave `last` alone so the same pending change
                 # keeps showing up as different and gets retried.
-                if not run_setup(extra):
+                if not run_setup(watch_extra):
                     print("  setup.py reported an error - keeping the change queued, will retry on the next check.")
                     continue
                 last = now

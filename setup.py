@@ -208,9 +208,19 @@ def prune_stale_scripts(sftp, state, seen_remote_paths, log):
         try:
             sftp.remove(p)
             log(f"  removed {p}")
+            # BUG FOUND AND FIXED: this used to del state[p] unconditionally,
+            # even when sftp.remove() raised - if removal genuinely failed
+            # (a permissions issue, a busy handle, anything other than
+            # "already gone"), the state cache would still forget this path
+            # was ever tracked. On every future run, prune_stale_scripts()
+            # only ever considers paths still present in `state` - so a
+            # failed removal that also got forgotten here would NEVER be
+            # retried again, silently leaving that stale file on the device
+            # forever with no future run ever attempting to clean it up.
+            # Only forget it once it's actually confirmed gone.
+            del state[p]
         except IOError as e:
             log(f"  WARNING: couldn't remove {p} (may already be gone): {e}")
-        del state[p]
 
 
 PAYLOAD_META = {
