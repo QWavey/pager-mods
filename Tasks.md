@@ -34,6 +34,7 @@ For 8. Only launch new /improve 30 + /bug-hunt 10 agents for sniff.sh if the red
 9. [ ] Add numeric validation to connect.sh's --timeout
 10. [ ] Add numeric validation to clientip.sh's --timeout
 11. [ ] Add numeric validation to PayloadRunner.sh's --timeout
+12. [ ] Harden pid_running() against PID-reuse false positives
 
 ---
 
@@ -42,3 +43,5 @@ For 9. connect.sh's --timeout is handed straight to WIFI_WAIT with no numeric ch
 For 10. Same idea for clientip.sh's --timeout (used in FIND_CLIENT_IP "$MAC" "$TIMEOUT") - already has a working fallback ("No IP found for $MAC...") but not a precise one. Same fix pattern as task 9. Done when: same criterion.
 
 For 11. Same idea for PayloadRunner.sh's --timeout (used in `timeout "$TIMEOUT" "${cmd[@]}"`) - the existing liveness-check error message already mentions "a bad --timeout value" as a possible cause, so this is the lowest-priority of the three, but an explicit check would make that the CONFIRMED reason instead of a guess. Same fix pattern. Done when: same criterion.
+
+For 12. lib/common.sh's `pid_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }` (used by deauth.sh/sniff.sh/bluetooth.sh/usb_monitor.sh/crash_logger.sh/PayloadRunner.sh/webui.sh's own is_running()) only checks that SOME process with that PID exists - if the original process died without its own --stop path ever running (a crash, an external `kill -9`, anything that skips the `rm -f "$PIDFILE"` cleanup every --stop already does) and the PID number later gets reused by a completely unrelated process, --status/--stop would falsely treat that unrelated process as "still running" (and --stop would `kill` it - a real, if narrow, blast-radius concern: killing an unrelated process by mistake). Not a confirmed real-world failure (no report of this actually happening, and OpenWRT's PID space plus this device's low process turnover make the reuse window narrow), so this is a defensive hardening, not an urgent fix. Fix idea: extend pid_running() to accept an expected process/script name and additionally check `grep -q NAME /proc/$PID/cmdline` (procfs is available on this device) before declaring it alive - would need a signature change propagated to all ~7 call sites. Done when: pid_running() (or a new variant) verifies the PID's actual cmdline matches the expected script before treating it as a live match, and every call site is updated to pass its own name.
