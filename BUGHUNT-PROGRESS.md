@@ -77,6 +77,29 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
     --disrupt --background; then ERROR_DIALOG` check could never actually
     trigger, since bluetooth.sh always returned 0 either way.
 
+11. scripts/loot.sh: its own -y/--yes fix (from earlier in this same sweep)
+    had been made in the working tree but never actually committed - caught
+    via a repo-wide `git status` sanity sweep after everything else looked
+    clean. Committed now; it had already been deployed to the device
+    (setup.py deploys from the working tree regardless of git state) but
+    the git history was missing it.
+
+## Live verification (device reachable this session)
+
+- Deployed via `python setup.py --skip-python3 --skip-scapy` - all changed
+  files uploaded successfully, usb_monitor.sh confirmed still running.
+- `bash -n` on every changed script passed on the ACTUAL device (mipsel
+  bash), not just this Windows dev machine.
+- Live-ran and confirmed working: `ssidpool.sh clear -y`, `reconsession.sh
+  --new -y`, `autossh.sh --clear -y`, `dnsspoof.sh --clear -y`,
+  `bands.sh --iface wlan1mon --2 --5 --6`, `openap.sh --off -y` - every one
+  of these would have failed (die "Aborted.") before this session's fixes.
+- `logread`/`dmesg` on the live device show zero errors/crashes/hangs -
+  system is healthy after all these changes.
+- Repo-wide `bash -n` sweep (every *.sh under scripts/ and payloads/) and
+  `python -m py_compile` on all three .py files: 100% clean, nothing
+  accidentally broken by this session's edits.
+
 ## Improvement-shaped ideas parked (not acted on here - see /quick-map output)
 
 (filled in if any surface)
