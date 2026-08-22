@@ -261,7 +261,29 @@ reset_bluetooth() {
     # of these actually succeeded - see reset_processes()'s comment above.
     local failed=0
     command -v hcitool >/dev/null 2>&1 && { timeout 5 hcitool cmd 0x08 0x001f >/dev/null 2>&1 || failed=1; }
-    command -v btmgmt >/dev/null 2>&1 && { timeout 5 btmgmt clr-adv >/dev/null 2>&1 || failed=1; }
+    # BUG FOUND AND FIXED (live-diagnosed via a real device report - this is
+    # very likely the actual reason "reset finished with errors" was seen):
+    # `btmgmt clr-adv` is NOT safe to call unconditionally the way this line
+    # assumed - confirmed live that it returns a real nonzero exit
+    # ("Remove Advertising failed with status 0x0d (Invalid Parameters)")
+    # whenever there are ZERO advertising instances currently registered,
+    # which is the NORMAL, common case every time this runs without an
+    # active adv-spam session (confirmed live: adding one instance then
+    # calling clr-adv succeeds cleanly, "Instance removed: 0", rc=0 - the
+    # command itself is fine, it just can't be called as a blind no-op the
+    # way this line treated it). This made reset.sh report a false "may
+    # still be in a bad state" alarm on almost every normal run, not just
+    # when something was actually wrong. Check `btmgmt advinfo`'s own
+    # instance count first (same parsing bluetooth.sh's own
+    # advspam_instance_count() already uses) - only call clr-adv, and only
+    # treat its failure as real, when there's actually something to clear.
+    if command -v btmgmt >/dev/null 2>&1; then
+        _adv_count=$(timeout 5 btmgmt advinfo 2>/dev/null | awk '/Instances list/ {print $4+0}')
+        case "$_adv_count" in ''|*[!0-9]*) _adv_count=0 ;; esac
+        if [ "$_adv_count" -gt 0 ] 2>/dev/null; then
+            timeout 5 btmgmt clr-adv >/dev/null 2>&1 || failed=1
+        fi
+    fi
     if command -v hciconfig >/dev/null 2>&1; then
         timeout 5 hciconfig hci0 down >/dev/null 2>&1 || failed=1
         timeout 5 hciconfig hci0 up >/dev/null 2>&1 || failed=1
@@ -378,10 +400,10 @@ reset_network() {
 
 echo "== reset.sh =="
 say "This will:"
+[ "$DO_NETWORK" = "1" ] && say "  - Tear down any leftover br-sniff bridge and reload the network config (may briefly interrupt SSH - reconnect after)"
 [ "$DO_PROCESSES" = "1" ] && say "  - Stop any running deauth/bluetooth/sniff/tracer/EvilTwin/deadnet/wigle captures or attacks"
 [ "$DO_WIFI" = "1" ] && say "  - Reset the WiFi channel lock so recon resumes normal hopping"
 [ "$DO_BLUETOOTH" = "1" ] && say "  - Reset the Bluetooth radio (end Direct Test Mode / adv-spam)"
-[ "$DO_NETWORK" = "1" ] && say "  - Tear down any leftover br-sniff bridge and reload the network config (may briefly interrupt SSH - reconnect after)"
 
 if [ "$ASSUME_YES" != "1" ]; then
     confirm "Proceed?" || die "Aborted."
@@ -407,10 +429,31 @@ progress_bar() {
     say "[$bar] ${pct}%"
 }
 
+# BIG CHANGE (found via live device report): --network used to run LAST -
+# reasonable back when reset_processes()'s own per-script --stop calls had
+# no timeout of their own (see that function's history: the concern was
+# "if processes hangs, network recovery - the actual SSH-fix step - might
+# never even get reached"). Every step here is now internally
+# timeout-bounded (this session's own hardening work), so that specific
+# risk no longer applies regardless of order - but a live report showed the
+# REAL cost of the old order: right after a LAN Sniffer bridge attempt left
+# the network mid-disrupted, reset.sh's WiFi/Bluetooth steps (which ran
+# BEFORE --network reloaded/recovered the network stack) hit real
+# contention - PINEAPPLE_EXAMINE_RESET timed out at 10s despite normally
+# completing in under a second, live-retested clean moments later once the
+# network had settled. Network recovery is this whole script's actual
+# stated purpose ("the ONE command that puts everything back... without
+# needing a full reboot") - running it FIRST gets connectivity/topology
+# back to a known-good state before anything else runs, instead of having
+# other steps potentially fight contention from an in-progress network
+# reconfiguration. Honest caveat: this reorder is reasoned from live
+# evidence, not independently re-reproduced under the exact same disrupted
+# conditions - low risk either way since every step remains individually
+# safe/idempotent regardless of order.
+[ "$DO_NETWORK" = "1" ] && { reset_network; progress_bar; }
 [ "$DO_PROCESSES" = "1" ] && { reset_processes; progress_bar; }
 [ "$DO_WIFI" = "1" ] && { reset_wifi; progress_bar; }
 [ "$DO_BLUETOOTH" = "1" ] && { reset_bluetooth; progress_bar; }
-[ "$DO_NETWORK" = "1" ] && { reset_network; progress_bar; }
 
 # ensure_usb_monitor - the positive guarantee (asked for explicitly):
 # confirm usb_monitor.sh is still running after whatever this script just
