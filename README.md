@@ -114,45 +114,95 @@ second SSH session already open (`scripts/mgmt.sh` to enable the
 Management AP) as a safety net **before** touching `eth0` again, not
 live on the same connection being disrupted.
 
-**OPEN INVESTIGATION (not yet root-caused - do not guess a fix without a
-live re-test): the tethered PC's internet access can die during a plain
-`--bridge` (no `--dhcp` involved).** Live-observed via
-`sniff.sh --iface br-sniff`'s own packet log during a real Bridge/tap
-run: a DNS query to the LAN's local resolver (a private/ULA IPv6
-address) went out and got a correct answer back through the bridge, but
-every subsequent TCP SYN from the same client to the public internet
-(Google's IPv6 ranges) got zero replies - repeated retries, no SYN-ACK,
-no RST, for the whole capture window. That's a real, reproducible
-outage, not the DHCP-renewal issue the rest of this postmortem is about
-(this client was on IPv6 SLAAC, not DHCP - there's no "stale lease" to
-renew here). `br_netfilter` was checked and ruled out with direct
-evidence (module not loaded, `/proc/sys/net/bridge/bridge-nf-call-*`
-don't even exist on this kernel) - the standard "bridged traffic
-accidentally hits the firewall's FORWARD chain" explanation doesn't
-apply here. True root cause is still open: worth re-checking whether
-`fw4`'s zone/interface-name matching (its `wan`/`lan` zones are keyed to
-`eth1`/`wlan0cli`/`br-lan` by name, not aware of the ad-hoc `br-sniff`
-sniff.sh creates outside UCI) somehow still applies to `br-sniff`
-traffic despite `br_netfilter` being absent, or whether this was simply
-an unrelated ISP/WAN hiccup at that exact moment - both are plausible
-and neither is confirmed. Next step when the device is available again:
-reproduce with a second, WiFi-based SSH session open (`scripts/mgmt.sh`)
-so the state can be inspected (`nft list ruleset` counters, `ip -s link`
-drop counts) WHILE the outage is happening, instead of only after the
-fact.
+**UPDATE (second live report, more detail): the internet outage during a
+plain `--bridge` self-heals after roughly 1-2 minutes, and is worse for
+already-open connections than new ones.** Confirmed on a second, longer
+bridge session: sites the browser already had warm/cached connections to
+kept loading (fast, since no fresh ARP/routing resolution was needed);
+brand-new destinations failed or loaded very slowly during the outage
+window; plain `http://` sites never loaded at all during that window in
+either case. All of this is consistent with the ARP/neighbor-cache
+staleness theory from the first report - existing flows ride on
+already-resolved neighbor entries and mostly survive, new flows need a
+fresh ARP/ND resolution that isn't settling immediately after the
+topology change, and it clears up once the cache naturally times out and
+re-resolves (matches the observed ~1-2 minute recovery). Still not fully
+root-caused (the `fw4`/br_netfilter possibilities from the first report
+remain open, unconfirmed), but "self-heals in 1-2 minutes" changes the
+practical severity from "the bridge silently drops your connection" to
+"there's a real, bounded settling window right after bridging" - worth
+mentioning explicitly in the payload's own confirmation dialog rather
+than just chasing a code fix for something that may be inherent to how
+ARP/ND resolution works after a topology change.
 
-**Tiny UX reports from the same session, not yet confirmed by a live
-retest:** (1) the duration picker (Timer/Infinite) could show a leftover
-"pick a time" `NUMBER_PICKER` prompt even after "Infinite" was chosen -
-hardened the comparison in `pick_duration()` to match tolerantly instead
-of an exact string equality, and added a 1s settle pause before that
-picker in case it was actually an input-event timing race with the
-ALERT right before it; (2) stopping a running capture sometimes surfaced
-the platform's own generic "Stop payload execution / Exit payload log"
-menu instead of this payload's own confirm-then-save-log flow - most
-likely the platform's own kill-payload control being used instead of
-this payload's B-button handling, which this script has no way to
-override, but not confirmed without seeing it reproduced live.
+**Live packet-feed content that LOOKS broken but isn't:** the "spammy"
+raw feed occasionally shows lines like `ethertype Unknown (0x88e1)` or
+`(0x8912)` followed by a hex dump of mostly `0000 0000 0000...` bytes.
+This is normal, correct tcpdump behavior, not a bug - some devices on a
+real LAN (this looked like HomePlug/powerline-networking control
+traffic) send proprietary Ethernet frame types tcpdump has no specific
+decoder for, and its documented fallback for those is exactly this: a
+raw hex+ASCII dump of whatever's there, which for a short, mostly-empty
+control frame is legitimately going to be a wall of zero bytes. It's
+genuinely captured, genuinely uninteresting data, not a parsing failure.
+
+**CRITICAL, CONFIRMED LIVE - the device actually crashed during an
+extended, busy capture.** Root-caused and fixed: `run_creds_watcher()`
+and `run_packet_feed()` both re-scan the ENTIRE growing capture file
+from byte 0 every cycle (every 5s and 2s respectively), with no upper
+bound - for a long capture against genuinely busy real traffic (the
+report: several browser tabs, YouTube, multiple sites), the file grows
+into the multiple-MB range, and every cycle re-decodes the whole thing
+again (`tcpdump -A`'s ASCII conversion is typically several times larger
+than the binary it's decoding). `run_creds_watcher` additionally wrote
+that whole decoded dump out to a `/tmp` file every cycle - `/tmp` on a
+device like this is conventionally tmpfs (RAM-backed), meaning a second
+full, ever-growing copy competing for the same 251MB total RAM budget as
+the live tcpdump capture itself, the concurrent `run_packet_feed`
+re-decode, and everything else running. This also explains two other
+live reports from the same sessions: "Stop monitoring and exit" having a
+long delay before taking effect (a `kill` sent to a subshell blocked
+inside a single unbounded `tcpdump -A -r`/`grep` call on an ever-larger
+file isn't actionable until that call returns - bash defers signal
+handling for a blocked foreground command), and "button A doesn't pause
+it" (the on-screen log appears to drain already-queued messages
+independently of the script's own process state - a deep backlog of
+individually-queued `LOG` calls, one per new line during a busy feed,
+keeps visibly scrolling for a while even after the scroller is killed).
+Fixed with a `MAX_LIVE_WATCH_BYTES` (4MB) cap - past that size, both
+live watchers cleanly stop themselves with one explanatory log line and
+hand off entirely to `--summary`, which still scans the complete file
+exactly once - plus `timeout`-wrapping every tcpdump/grep call in both
+functions (and in `summarize_pcap` too) so a worst-case delay is now
+bounded instead of "however long a full-file scan happens to take," and
+batching the payload's own scroller into one `LOG` call per poll tick
+instead of one per line, to shrink the platform's own queued-message
+backlog. Not yet re-verified live (device was rebooting) - the reasoning
+and each piece is verified in isolation, but the actual crash scenario
+itself needs a real re-test with a similarly busy, extended capture.
+
+**Tiny UX report, now actually fixed (was previously guessed at twice
+and still wrong both times):** the duration picker (Timer/Infinite)
+showing a leftover "pick a time"-ish dialog after Infinite was already
+chosen, dismissed with a single A press. The dismiss-with-one-press
+detail was the giveaway - that's `ALERT`'s behavior, not `NUMBER_PICKER`
+misfiring. Root cause: the `ALERT "Bridge is up - pick a capture
+duration next"` call (which fires before the duration picker in the
+code) appears to get queued by the platform and not actually render
+until after the very next `LIST_PICKER`'s own interaction finishes - an
+ordering problem no settle-pause between the two calls can fix, since
+the ALERT was already queued before the pause even started. Removed the
+ALERT entirely (replaced with a plain `LOG`, which needs no dismissal so
+it can never appear out of order) rather than guess at the timing a
+third time.
+
+**Still open, not confirmed by a live retest:** stopping a running
+capture sometimes surfaced the platform's own generic "Stop payload
+execution / Exit payload log" menu instead of this payload's own
+confirm-then-save-log flow - most likely the platform's own kill-payload
+control being used instead of this payload's B-button handling, which
+this script has no way to override, but not confirmed without seeing it
+reproduced live.
 
 ## Structure
 

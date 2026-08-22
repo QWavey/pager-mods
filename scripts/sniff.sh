@@ -251,8 +251,25 @@ summarize_pcap() {
     # packet/header summaries, -A -r for ASCII payload) exactly ONCE and
     # reuse the captured text for every section below - cuts 8 full-file
     # passes down to 2.
-    NN_DUMP=$(tcpdump -nn -r "$file" 2>/dev/null)
-    A_DUMP=$(tcpdump -A -r "$file" 2>/dev/null)
+    # BUG FOUND AND FIXED (live-caught - a real, extended, busy capture
+    # crashed the device after "a while recording packets"): these two
+    # calls had no bound at all, on a file that can grow arbitrarily large
+    # for an --duration-less "until stopped" background capture. This is a
+    # ONE-TIME cost (unlike run_creds_watcher/run_packet_feed's repeated
+    # per-cycle re-scans, already capped separately via MAX_LIVE_WATCH_
+    # BYTES), so a full pass is still worth attempting even for a large
+    # file rather than silently truncating real capture data - but it
+    # needs a bound so a pathological case fails cleanly instead of
+    # hanging/compounding memory pressure right as the capture is also
+    # winding down (when the main tcpdump process and any still-exiting
+    # watcher/feed subshells are all still holding their own memory).
+    # 90s is generous (this runs once, not every 5s) but still finite.
+    size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
+    if [ "${size:-0}" -gt 20971520 ] 2>/dev/null; then
+        say "Capture is $((size / 1024 / 1024))MB - summarizing may take a while and use real memory on this device, please wait..."
+    fi
+    NN_DUMP=$(timeout 90 tcpdump -nn -r "$file" 2>/dev/null)
+    A_DUMP=$(timeout 90 tcpdump -A -r "$file" 2>/dev/null)
     # grep -c . (not `wc -l`) to count lines in an already-captured
     # variable: command substitution strips ALL trailing newlines, so
     # `echo "$var" | wc -l` would misreport an empty capture as 1 line
@@ -261,7 +278,6 @@ summarize_pcap() {
     # and non-empty case (same idiom already used by run_creds_watcher/
     # run_packet_feed elsewhere in this file for the same reason).
     total=$(echo "$NN_DUMP" | grep -c .)
-    size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
     echo
     echo "== Capture summary: $file =="
     echo "  Total packets: $total"
@@ -496,6 +512,41 @@ watcher_tag_hit() {
 #     which packet a match belongs to for dedup purposes, only this one
 #     even tracks blocks at all) - cosmetic (no wrong data, just a
 #     redundant repeat), not chased further here.
+# MAX_LIVE_WATCH_BYTES - CRITICAL BUG FOUND AND FIXED (live-caught: a
+# real, extended, busy capture crashed the device entirely, plus --stop/
+# pause had a long, unexplained delay before taking effect). Both
+# run_creds_watcher and run_packet_feed re-scan the ENTIRE growing
+# capture file from byte 0 every cycle, with no upper bound - for a
+# capture that runs for a while against genuinely busy traffic (the
+# reporter's case: several browser tabs, YouTube, multiple sites), the
+# file can grow into the multiple-MB range, and EVERY cycle re-decodes
+# the WHOLE thing again (tcpdump -A's ASCII conversion is typically
+# several times LARGER than the binary pcap it's decoding). run_creds_
+# watcher additionally writes that whole decoded dump out to a /tmp file
+# every cycle - /tmp on OpenWRT devices like this one is conventionally
+# tmpfs (RAM-backed), so that's a SECOND full copy of an ever-growing
+# blob competing for the same 251MB total RAM budget as the live
+# tcpdump capture process itself, run_packet_feed's own simultaneous
+# re-decode, and everything else running. Capping how much of the
+# capture this machinery will ever re-scan bounds BOTH the growing
+# CPU cost (already documented) AND this growing memory cost, and
+# indirectly fixes the slow-stop/slow-pause reports too: kill/SIGTERM
+# sent to a subshell blocked inside a single `tcpdump -A -r` call on an
+# unbounded, ever-larger file isn't actionable until that call returns
+# (bash defers signal handling for a blocked foreground command) - a
+# capture that grew large enough could make a single cycle take a very
+# long time, directly explaining "stop doesn't take effect immediately,
+# but does eventually." 4MB is comfortably past what a single cycle can
+# process in a reasonable time on this hardware (this session's own
+# measurements: a much smaller ~3.5MB/18.8k-line dump already took
+# 15-25s per grep pass) while still covering the vast majority of real
+# LAN Sniffer sessions, which are typically short diagnostic captures,
+# not hours-long monitoring. Once a capture crosses this size, the live
+# watchers cleanly stop themselves (with one explanatory log line) and
+# hand off entirely to the end-of-capture `--summary`, which still scans
+# the complete file exactly once, not repeatedly.
+MAX_LIVE_WATCH_BYTES=4194304
+
 run_creds_watcher() {
     local file="$1" last_creds=0 last_http=0 last_size=-1
     # is_running (PIDFILE-based) covers --background; for a foreground
@@ -520,8 +571,13 @@ run_creds_watcher() {
         [ "$cur_size" = "$last_size" ] && continue
         last_size="$cur_size"
 
+        if [ "$cur_size" -gt "$MAX_LIVE_WATCH_BYTES" ] 2>/dev/null; then
+            echo "[sniff.sh] Live HTTP/creds tagging stopped - capture has grown past $((MAX_LIVE_WATCH_BYTES / 1024 / 1024))MB, re-scanning it every cycle would cost too much CPU/RAM on this device. The full capture is still being saved; run 'sniff.sh --summary' on it (or wait for the automatic one) for the complete picture."
+            return 0
+        fi
+
         local dumpf="/tmp/pager-sniff-watcher-dump.$$"
-        tcpdump -A -r "$file" 2>/dev/null > "$dumpf"
+        timeout 15 tcpdump -A -r "$file" 2>/dev/null > "$dumpf"
         [ -s "$dumpf" ] || { rm -f "$dumpf"; continue; }
 
         # BUG FOUND AND FIXED (live-caught while verifying this version):
@@ -535,9 +591,15 @@ run_creds_watcher() {
         # this bug already existed in this function's very first version
         # too (same counting idiom), just never caught until this rewrite
         # was verified line-by-line against real data.
+        #
+        # Each grep is also now `timeout`-bounded: measured live at 15-25s
+        # for a real ~18.8k-line dump, so an unusually dense capture (still
+        # under the MAX_LIVE_WATCH_BYTES cap above, but denser than that
+        # measurement) could still run long - bounding it directly caps the
+        # worst-case delay before this subshell can next notice a --stop.
         local creds_lines http_lines creds_count http_count
-        creds_lines=$(grep -noiE "$CREDS_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
-        http_lines=$(grep -noiE "$HTTP_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
+        creds_lines=$(timeout 15 grep -noiE "$CREDS_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
+        http_lines=$(timeout 15 grep -noiE "$HTTP_PATTERN" "$dumpf" | cut -d: -f1 | sort -un)
         creds_count=$(echo -n "$creds_lines" | grep -c .)
         http_count=$(echo -n "$http_lines" | grep -c .)
 
@@ -614,8 +676,19 @@ run_packet_feed() {
         cur_size=$(wc -c < "$file" 2>/dev/null)
         [ "$cur_size" = "$last_size" ] && continue
         last_size="$cur_size"
+
+        # BUG FOUND AND FIXED (live-caught - a real, extended, busy
+        # capture crashed the device): same unbounded-re-scan risk as
+        # run_creds_watcher's own MAX_LIVE_WATCH_BYTES fix, and this loop
+        # runs at 2s cadence - even faster, even more re-scanning of an
+        # ever-larger file. Same cap, same reasoning.
+        if [ "$cur_size" -gt "$MAX_LIVE_WATCH_BYTES" ] 2>/dev/null; then
+            echo "[sniff.sh] Live packet feed stopped - capture has grown past $((MAX_LIVE_WATCH_BYTES / 1024 / 1024))MB, re-scanning it every 2s would cost too much CPU/RAM on this device. The full capture is still being saved."
+            return 0
+        fi
+
         local lines count new
-        lines=$(tcpdump -nn -r "$file" 2>/dev/null)
+        lines=$(timeout 10 tcpdump -nn -r "$file" 2>/dev/null)
         [ -z "$lines" ] && continue
         count=$(echo "$lines" | grep -c .)
         if [ "$count" -gt "$last_count" ]; then

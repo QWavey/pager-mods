@@ -1,8 +1,8 @@
 #!/bin/bash
 # Title: LAN Sniffer
 # Author: florian
-# Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - full internet access stays intact) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
-# Version: 3.4
+# Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - internet is forwarded through, not blocked, with a brief settling window after bridging) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
+# Version: 3.5
 #
 # This is a general-payload wrapper around sniff.sh's own capture pipeline
 # (nothing new re-implemented here). There was no dedicated Payloads-menu
@@ -32,7 +32,19 @@
 # lines grep actually flags - see its own comment for the measured
 # numbers and the honest remaining limits (still not sub-5s "live" for a
 # genuinely busy capture; the same real event can occasionally get tagged
-# twice due to a tcpdump -A quirk).
+# twice due to a tcpdump -A quirk). v3.5 (this version) fixes three more
+# reports from a real extended, busy capture: the device could crash
+# outright (sniff.sh's live watchers had no cap on how much of a growing
+# capture they'd re-scan every cycle - fixed there with a MAX_LIVE_WATCH_
+# BYTES cap and timeout-bounded calls, see sniff.sh's own comment);
+# "Stop monitoring and exit?" and pausing with A could both have a long,
+# confusing delay before actually taking effect (same root cause, plus
+# this payload's own scroller queuing one LOG call per new line during a
+# busy feed - now batched into one call per poll tick); and the "internet
+# access stays intact" claim in the Bridge/tap confirmation dialog and
+# menu wording was softened to match what was actually observed live
+# (forwarded, not blocked, but with a real ~1-2 minute settling window
+# right after bridging - see README.md's postmortem).
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -187,11 +199,42 @@ maybe_save_log() {
 SCROLLER_PID=""
 start_scroll() {
     (
-        local __last=0 __total
+        local __last=0 __total __new_count __chunk
         while :; do
             __total=$(wc -l < /tmp/pager-sniff.log 2>/dev/null || echo 0)
             if [ "$__total" -gt "$__last" ] 2>/dev/null; then
-                tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null | while IFS= read -r __line; do LOG "$__line"; done
+                __new_count=$((__total - __last))
+                # BUG FOUND AND FIXED (live-caught - reported as "button A
+                # doesn't pause it" and a delayed/ignored "Stop monitoring
+                # and exit?"): this used to call LOG once PER NEW LINE via
+                # a `while read` loop - during a busy capture (the packet
+                # feed alone ticks every 2s, plus the creds watcher's own
+                # output), a single poll cycle here could queue dozens of
+                # separate LOG calls back to back. The platform's own
+                # on-screen log appears to drain already-queued messages
+                # independently of this script's own process state (this
+                # session's other finding: a queued ALERT could render
+                # after the process that issued it had already moved on to
+                # a later step) - so a deep backlog of individually-queued
+                # LOG calls keeps visibly scrolling for a while even after
+                # this scroller (or the whole capture) is stopped, which
+                # looks exactly like "pause/stop doesn't work" even though
+                # the script side already did what it was asked the moment
+                # it was asked. Batching every new line into ONE LOG call
+                # (embedded newlines - already proven to render fine, e.g.
+                # sniff.sh's own multi-line success output) queues exactly
+                # one message per poll tick instead of up to dozens,
+                # directly shrinking that backlog. Also caps to the most
+                # recent 40 lines per tick (with a "N skipped" note) so a
+                # single genuinely huge burst can't itself become one
+                # enormous, slow-to-render LOG call.
+                if [ "$__new_count" -gt 40 ]; then
+                    __chunk="-- $((__new_count - 40)) line(s) skipped, capture is very busy --
+$(tail -n 40 /tmp/pager-sniff.log 2>/dev/null)"
+                else
+                    __chunk=$(tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null)
+                fi
+                LOG "$__chunk"
                 __last="$__total"
             fi
             sleep 1
@@ -295,7 +338,7 @@ run_live_capture() {
 # required "which option is preselected" parameter, separate from the
 # option list ("A default option must always be provided!"). Restored
 # here (defaulting to "Quick capture", the original pre-regression default).
-__mode=$(LIST_PICKER "LAN Sniffer" "Quick capture" "Bridge/tap both adapters (keeps full internet access)" "Check adapter status" "Quick capture") || exit 0
+__mode=$(LIST_PICKER "LAN Sniffer" "Quick capture" "Bridge/tap both adapters (internet forwarded, brief settle time)" "Check adapter status" "Quick capture") || exit 0
 
 case "$__mode" in
     "Check adapter status")
@@ -312,7 +355,7 @@ case "$__mode" in
         exit 0
         ;;
 
-    "Bridge/tap both adapters (keeps full internet access)")
+    "Bridge/tap both adapters (internet forwarded, brief settle time)")
         LOG "Checking adapters (USB-C + USB-A)..."
         __a=$(usb_a_iface)
         if [ -z "$__a" ] || ! iface_up "$__a" || ! iface_up eth0; then
@@ -320,7 +363,19 @@ case "$__mode" in
             exit 0
         fi
         LOG "USB-C (eth0) and USB-A ($__a) both connected."
-        if ! CONFIRMATION_DIALOG "Bridge eth0 <-> $__a? The PC keeps FULL internet access through the router the whole time - the Pager just sits transparently in the middle and watches a copy of the traffic, it doesn't interrupt anything. Proceed?"; then
+        # BUG FOUND AND FIXED (live-caught, twice - the original wording
+        # was misleading): this used to claim the PC "keeps FULL internet
+        # access... the whole time" - live-observed on two separate real
+        # bridge sessions that this isn't quite true: there's a real,
+        # bounded settling window (roughly 1-2 minutes, self-resolving)
+        # right after the bridge comes up where new connections can fail
+        # or load slowly while the client's own ARP/neighbor-discovery
+        # cache catches up with the topology change - see README.md's
+        # postmortem for the full detail. Already-open connections mostly
+        # survive; brand-new ones are what's affected. Softened the claim
+        # to match what was actually observed instead of promising
+        # something that wasn't quite true.
+        if ! CONFIRMATION_DIALOG "Bridge eth0 <-> $__a? The PC's internet access is forwarded through, not blocked - but expect a real settling window of roughly 1-2 minutes right after this comes up where some sites load slowly or not at all while your PC's own network cache catches up with the change. It self-resolves; no action needed. Proceed?"; then
             LOG "User cancelled."
             exit 0
         fi
