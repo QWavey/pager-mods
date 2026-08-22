@@ -135,9 +135,30 @@ def upload_tree(sftp, local_root, remote_root, log, state, force=False):
     SKIP_DIRS = {"__pycache__", ".git"}
     SKIP_SUFFIXES = (".pyc", ".pyo")
 
+    # BUG FOUND AND FIXED (root-caused live, via a real device): os.walk's
+    # default top-down order visits the top-level scripts/*.sh files BEFORE
+    # ever descending into scripts/lib/ - meaning every deploy has always
+    # uploaded scripts that depend on lib/common.sh's shared functions
+    # BEFORE common.sh itself got updated. This didn't matter while
+    # common.sh barely changed, but now several scripts depend on shared
+    # functions defined there (ip_link, pid_running, canonicalize_lan_
+    # topology) - a deploy landing mid-upload, or a payload launched from
+    # the physical device WHILE a push is still in flight, can hit a real
+    # window where an already-updated script calls a shared function a
+    # not-yet-updated common.sh doesn't have yet. Confirmed live: this is
+    # exactly what an "ERROR: Interface 'eth0' does not exist" report
+    # turned out to be (ip_link undefined mid-deploy - eth0 was fine the
+    # whole time). Sort scripts/lib/ to the front of the walk so shared
+    # dependencies always land before anything that depends on them, in
+    # every deploy, not by luck of which files happened to change together.
+    walk_entries = sorted(
+        os.walk(local_root),
+        key=lambda entry: 0 if os.path.basename(entry[0]) == "lib" else 1,
+    )
+
     uploaded = skipped = 0
     seen_remote_paths = set()
-    for dirpath, dirnames, filenames in os.walk(local_root):
+    for dirpath, dirnames, filenames in walk_entries:
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         rel = os.path.relpath(dirpath, local_root)
         remote_dir = remote_root if rel == "." else remote_root + "/" + rel.replace(os.sep, "/")
@@ -346,6 +367,55 @@ def deploy_payloads(client, sftp, local_payloads_root, log, state, force=False):
             log("  WARNING: pineapple app process did not respawn - you may need to power-cycle the device.")
 
 
+# BUG FOUND AND FIXED (found live, via a real reboot): usb_monitor.sh only
+# ever gets (re)started by setup.py explicitly checking/launching it - there
+# was no autostart mechanism of any kind (confirmed live: no /etc/init.d
+# entry for it, /etc/rc.local was still the untouched default stub, no
+# crontab). A physical reboot leaves it not running until someone thinks to
+# re-run setup.py or start it by hand - exactly what was observed: it was
+# running right after a deploy, then simply wasn't anymore a few minutes
+# later with nothing left running or logged, consistent with never having
+# been restarted after whatever stopped it (or a boot in between).
+# /etc/rc.local is the standard, OpenWRT-documented place for "run once
+# system init finished" - this ensures ONE idempotent line there so a
+# reboot brings the USB attach/detach watcher back on its own. Read-modify-
+# write via SFTP (not a remote shell one-liner) specifically to avoid
+# fragile quoting over an SSH exec_command round-trip for something that
+# edits a system boot file.
+USB_MONITOR_AUTOSTART_LINE = "[ -x /root/scripts/usb_monitor.sh ] && /root/scripts/usb_monitor.sh --background >/dev/null 2>&1"
+
+
+def ensure_usb_monitor_autostart(client, log):
+    try:
+        sftp = client.open_sftp()
+        try:
+            with sftp.open("/etc/rc.local", "r") as f:
+                content = f.read().decode("utf-8", errors="replace")
+        except IOError:
+            content = "exit 0\n"
+        if USB_MONITOR_AUTOSTART_LINE in content:
+            log("  usb_monitor.sh autostart already present in /etc/rc.local.")
+            sftp.close()
+            return
+        lines = content.splitlines()
+        # Insert right before the final "exit 0" - OpenWRT's rc.local always
+        # ends with one, and anything placed AFTER it would never run.
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            if line.strip() == "exit 0":
+                insert_at = i
+                break
+        lines.insert(insert_at, USB_MONITOR_AUTOSTART_LINE)
+        new_content = "\n".join(lines) + "\n"
+        with sftp.open("/etc/rc.local", "w") as f:
+            f.write(new_content.encode("utf-8"))
+        sftp.chmod("/etc/rc.local", 0o755)
+        sftp.close()
+        log("  Added usb_monitor.sh autostart to /etc/rc.local - it will survive a reboot now.")
+    except Exception as e:
+        log(f"  WARNING: could not ensure usb_monitor.sh autostart in /etc/rc.local: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Install the Pager Toolkit onto a WiFi Pineapple Pager.")
     ap.add_argument("--config", default=os.path.join(HERE, "config.txt"))
@@ -450,6 +520,9 @@ def main():
             print("  Script changed - restarting to pick up the update...")
         run(f". /root/.profile && {REMOTE_ROOT}/usb_monitor.sh --background", timeout=10)
         print("  Started.")
+
+    print("Ensuring usb_monitor.sh survives a reboot (/etc/rc.local)...")
+    ensure_usb_monitor_autostart(client, log)
 
     if not args.skip_python3:
         rc, out, err = run("which python3", timeout=10)
