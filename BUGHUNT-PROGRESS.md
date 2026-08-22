@@ -69,6 +69,14 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
    confirmAuthorized() JS-side gate for the two/four that are actually
    consequential (openOn doesn't need one).
 
+10. bluetooth.sh: --disrupt --background was the one launch path in this
+    file with no post-launch liveness check, unlike --flood/--jam-area
+    right next to it which already fixed this exact class - could claim
+    "Started in background" even if the subshell died immediately (no
+    hci0/hcitool). Also meant the bluetooth_jam payload's own `if ! ...
+    --disrupt --background; then ERROR_DIALOG` check could never actually
+    trigger, since bluetooth.sh always returned 0 either way.
+
 ## Improvement-shaped ideas parked (not acted on here - see /quick-map output)
 
 (filled in if any surface)
