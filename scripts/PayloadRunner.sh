@@ -55,7 +55,13 @@ usage() { print_help "$0"; exit 1; }
 # manageable thing instead of a fire-and-forget PID you have to remember.
 PIDFILE="/tmp/pager-payloadrunner.pid"
 NAMEFILE="/tmp/pager-payloadrunner.name"
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process - "payload.sh"
+# is the one generic marker every backgrounded payload's real cmdline
+# actually contains (env PAYLOAD_HOME=... bash .../payload.sh), sufficient
+# here since only one payload is ever tracked at a time (see the
+# single-instance check below).
+is_running() { pid_running "$PIDFILE" "payload.sh"; }
 
 DO_LIST=0
 DO_STATUS=0

@@ -499,7 +499,11 @@ fi
 # BIG CHANGE (adopting common.sh's shared primitive): backed by the one
 # canonical pid_running() in lib/common.sh instead of another independent
 # copy of the same "PIDFILE + kill -0" check.
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process - the
+# backgrounded capture is a subshell of THIS script, so its real
+# /proc/PID/cmdline still shows "sniff.sh".
+is_running() { pid_running "$PIDFILE" "sniff.sh"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then

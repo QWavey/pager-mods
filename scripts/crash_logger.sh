@@ -50,7 +50,11 @@ done
 # BIG CHANGE (adopting common.sh's shared primitive): same PIDFILE+kill-0
 # check duplicated across deauth.sh/sniff.sh/bluetooth.sh - now backed by
 # one canonical pid_running() in lib/common.sh instead of yet another copy.
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process - the
+# backgrounded run_logger loop is a subshell of THIS script, so its real
+# /proc/PID/cmdline still shows "crash_logger.sh".
+is_running() { pid_running "$PIDFILE" "crash_logger.sh"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then

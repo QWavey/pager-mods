@@ -312,7 +312,11 @@ RECON_FRESH_SECONDS=180
 # exact duplicated check earlier in this sweep): backed by the one
 # canonical pid_running() in lib/common.sh instead of independently
 # maintaining this same "PIDFILE + kill -0" logic here too.
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process - every attack
+# loop launched via launch_attack() is a subshell of THIS script, so its
+# real /proc/PID/cmdline still shows "deauth.sh".
+is_running() { pid_running "$PIDFILE" "deauth.sh"; }
 
 # Sentinel (dual-radio passive sensing for --reactive - see
 # start_sentinel()'s own header comment further down for the full
@@ -329,7 +333,7 @@ is_running() { pid_running "$PIDFILE"; }
 # found" the one time it actually needs to run.
 SENTINEL_PIDFILE="/tmp/pager-deauth-sentinel.pid"
 SENTINEL_STATE="/tmp/pager-deauth-sentinel-sighting"
-sentinel_running() { pid_running "$SENTINEL_PIDFILE"; }
+sentinel_running() { pid_running "$SENTINEL_PIDFILE" "deauth.sh"; }
 stop_sentinel() {
     if sentinel_running; then
         kill "$(cat "$SENTINEL_PIDFILE")" 2>/dev/null

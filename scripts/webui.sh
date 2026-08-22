@@ -38,7 +38,13 @@ done
 
 # BIG CHANGE (adopting common.sh's shared primitive): backed by the one
 # canonical pid_running() in lib/common.sh instead of yet another copy.
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process. Special case
+# vs. every other caller of pid_running(): the background launch below
+# does `exec $PY .../server.py`, which REPLACES the process image - so the
+# real /proc/PID/cmdline shows "server.py" (the python interpreter's own
+# argv), not "webui.sh" at all.
+is_running() { pid_running "$PIDFILE" "server.py"; }
 
 if [ "$DO_TOKEN" = "1" ]; then
     if [ -z "$TOKEN" ]; then

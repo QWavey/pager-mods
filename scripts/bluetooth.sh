@@ -187,7 +187,11 @@ trap _bt_on_stop INT TERM
 # sweep): this exact "PIDFILE + kill -0" check was duplicated byte-for-byte
 # here and in deauth.sh/sniff.sh - now backed by the one canonical
 # pid_running() in lib/common.sh instead of a third independent copy.
-is_running() { pid_running "$PIDFILE"; }
+# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
+# stale PIDFILE whose PID got reused by an unrelated process - every
+# background launch here (--flood/--jam-area/--disrupt) is a subshell of
+# THIS script, so its real /proc/PID/cmdline still shows "bluetooth.sh".
+is_running() { pid_running "$PIDFILE" "bluetooth.sh"; }
 
 # advspam_instance_count - how many BLE advertising instances btmgmt
 # currently has registered. advspam doesn't run as a background process

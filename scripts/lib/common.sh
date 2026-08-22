@@ -128,16 +128,54 @@ resolve_python3() {
 IP_LINK_TIMEOUT="${PAGER_IP_LINK_TIMEOUT:-5}"
 ip_link() { timeout "$IP_LINK_TIMEOUT" ip link "$@"; }
 
-# pid_running PIDFILE - is the process recorded in PIDFILE still alive? The
-# exact same "does this pidfile point at a live process" check was
-# duplicated, byte-for-byte, as each script's own local is_running() in both
-# deauth.sh and sniff.sh (and would very likely be copy-pasted a third time
-# into the next script that needs background-process tracking). Centralized
-# here - a script's own is_running() can now just be `pid_running "$PIDFILE"`
-# instead of restating the `[ -f ... ] && kill -0 "$(cat ...)"` pattern
-# itself, with the actual stale-PID/kill-0 semantics defined in exactly one
-# place.
-pid_running() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
+# pid_running PIDFILE [NAME_PATTERN] - is the process recorded in PIDFILE
+# still alive? The exact same "does this pidfile point at a live process"
+# check was duplicated, byte-for-byte, as each script's own local
+# is_running() in both deauth.sh and sniff.sh (and would very likely be
+# copy-pasted a third time into the next script that needs
+# background-process tracking). Centralized here - a script's own
+# is_running() can now just be `pid_running "$PIDFILE"` instead of restating
+# the `[ -f ... ] && kill -0 "$(cat ...)"` pattern itself, with the actual
+# stale-PID/kill-0 semantics defined in exactly one place.
+#
+# BUG FOUND AND FIXED (found via code review, parked in Tasks.md, now
+# implemented per user request): a bare `kill -0 $PID` only proves SOME
+# process currently has that PID - not that it's still the SAME process
+# this PIDFILE was written for. If the original process died without its
+# own --stop path ever running (a crash, an external `kill -9`, anything
+# that skips the `rm -f "$PIDFILE"` cleanup every --stop already does) and
+# the PID number later gets reused by a completely unrelated process
+# (sshd, a cron job, anything), --status/--stop would falsely treat that
+# unrelated process as "still running" - and --stop would `kill` it. Low
+# probability (OpenWRT's PID space plus this device's low process turnover
+# make the reuse window narrow), but a real, if narrow, blast-radius
+# concern worth closing now that it's this cheap to check on Linux.
+#
+# Optional NAME_PATTERN: when given, this is only treated as a genuine
+# match if /proc/$PID/cmdline (real, live, comes straight from the kernel -
+# not the PIDFILE's own claim) also contains that substring. Callers whose
+# backgrounded process is a bash subshell of the SAME script (bluetooth.sh,
+# crash_logger.sh, deauth.sh, sniff.sh, tracer.sh, usb_monitor.sh,
+# PayloadRunner.sh) pass their own script/payload name; webui.sh is the one
+# exception - its background launch `exec`s straight into python3, so its
+# real cmdline shows "server.py", not "webui.sh", and it passes that
+# instead. Fails OPEN (behaves exactly like the old bare kill -0) whenever
+# NAME_PATTERN is omitted, or /proc/$PID/cmdline can't be read for any
+# reason (procfs oddity, permissions) - this hardening should never turn
+# into a NEW false-negative source on ordinary, correctly-tracked
+# processes; it only needs to catch the "PID reused by something else
+# entirely" case when it CAN actually check.
+pid_running() {
+    local pidfile="$1" pattern="${2:-}" pid
+    [ -f "$pidfile" ] || return 1
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -n "$pattern" ] && [ -r "/proc/$pid/cmdline" ]; then
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$pattern" || return 1
+    fi
+    return 0
+}
 
 # ===========================================================================
 # BIG CHANGE: declarative LAN-topology reconciler.
