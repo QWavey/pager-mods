@@ -81,7 +81,16 @@ done
 # stale PIDFILE whose PID got reused by an unrelated process - the
 # backgrounded trace is a subshell of THIS script, so its real
 # /proc/PID/cmdline still shows "tracer.sh".
-is_running() { pid_running "$PIDFILE" "tracer.sh"; }
+# BUG FOUND AND FIXED (CRITICAL, self-introduced regression, same mistake
+# just caught live in sniff.sh - see that file's own comment for the full
+# story): run_trace() (below) `exec`s straight into tcpdump for BOTH the
+# foreground and background call sites (this file's own comment on
+# run_trace explains why that's safe here) - meaning the real backgrounded
+# process's /proc/PID/cmdline is "tcpdump ...", never "tracer.sh". Using
+# "tracer.sh" as the NAME_PATTERN here would have made is_running() always
+# return false for a capture that's actually running fine, exactly like
+# the sniff.sh bug. "tcpdump" is the correct pattern.
+is_running() { pid_running "$PIDFILE" "tcpdump"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
