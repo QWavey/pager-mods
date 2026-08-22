@@ -6,7 +6,7 @@
 #
 # Usage:
 #   loot.sh --list          summarize what's in /root/loot
-#   loot.sh --archive         archive current loot to a timestamped folder
+#   loot.sh --archive [-y]    archive current loot to a timestamped folder
 #   loot.sh                     interactive mode
 
 set -u
@@ -15,6 +15,19 @@ LOOT_ROOT="/root/loot"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review): this file never defined a
+# -y/--yes flag at all, unlike every other script in this toolkit with a
+# confirm() gate on a CLI action - `loot.sh --archive` (an explicit,
+# deliberate CLI invocation) could NEVER be automated/scripted, it always
+# blocked on an interactive y/N prompt with no way to bypass it. confirm()
+# itself already respects ASSUME_YES (see lib/common.sh) - this file just
+# never set it from an argument. Scanning for -y/--yes up front (rather
+# than adding it to the single-token case dispatch below) so it works
+# wherever it appears on the command line.
+for _arg in "$@"; do
+    case "$_arg" in -y|--yes) ASSUME_YES=1 ;; esac
+done
 
 do_list() {
     say "Loot summary ($LOOT_ROOT):"
