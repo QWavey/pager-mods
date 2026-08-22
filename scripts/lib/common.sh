@@ -13,6 +13,31 @@
 # blank line after it, so each script's own file is the single source of
 # truth for its --help text - no more hand-counted sed ranges going stale).
 
+# BUG FOUND AND FIXED (root-caused live via a real, reproducible device
+# failure - the same "ERROR: Interface 'eth0' does not exist" reported
+# from the Payloads menu, TWICE, even after eth0/eth1 were both confirmed
+# present and the deploy-ordering fix landed): every "ip link"/"ip"/"iw"/
+# "brctl"/"hciconfig" call this toolkit makes assumes those binaries are on
+# PATH. That's confirmed true for an interactive SSH session (PATH already
+# includes /sbin and /usr/sbin there) - but payloads launched from the
+# physical device's own Payloads menu run through the Hak5 pineapple app's
+# OWN payload-runner process, whose environment/PATH this project doesn't
+# control and can't directly inspect. A PATH missing /sbin (where `ip`
+# actually lives on this OpenWRT build) reproduces the exact reported
+# symptom: "ip: command not found" is a plain nonzero exit, indistinguishable
+# from a genuinely-missing interface to `ip_link show "$i" || die "...does
+# not exist"` - misleadingly blaming eth0 instead of the environment that
+# couldn't find the `ip` command at all. Guaranteeing PATH includes the
+# real locations of every system tool this toolkit depends on, regardless
+# of what the invoking process handed down, removes this whole class of
+# failure outright instead of hoping every future caller's environment is
+# adequate.
+case ":$PATH:" in
+    *:/sbin:*) : ;;
+    *) PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH" ;;
+esac
+export PATH
+
 TOOL_NAME="${TOOL_NAME:-$(basename "${0:-tool}")}"
 CFG_NS="${CFG_NS:-${TOOL_NAME%.sh}}"
 

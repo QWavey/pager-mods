@@ -704,7 +704,20 @@ if [ "$DO_BRIDGE" = "1" ]; then
     confirm "Proceed?" || die "Aborted."
 
     for i in "$BR_IFACE1" "$BR_IFACE2"; do
-        ip_link show "$i" >/dev/null 2>&1 || die "Interface '$i' does not exist."
+        if ! ip_link show "$i" >/dev/null 2>&1; then
+            # DIAGNOSTIC (added after this exact error was reported live,
+            # twice, from the physical Payloads menu, even with both
+            # interfaces confirmed present moments earlier by
+            # check_adapters()): captures enough forensic detail to tell a
+            # genuinely-missing interface apart from the `ip`/`timeout`
+            # commands themselves not being found (a PATH problem in
+            # whatever environment invoked this - common.sh now hardens
+            # PATH for exactly this, but this log line means a NEXT
+            # occurrence, for any reason, is diagnosable immediately
+            # instead of needing another round of guessing).
+            topology_log "bridge existence-check failed for '$i': PATH=$PATH ip=$(command -v ip 2>&1) timeout=$(command -v timeout 2>&1) direct_check=$(ip link show "$i" 2>&1)"
+            die "Interface '$i' does not exist."
+        fi
     done
 
     if ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
