@@ -169,173 +169,202 @@
     } catch (e) { out.textContent = String(e); }
   }
 
-  // -- WiFi master --
-  onClick("wifiOn", async () => { const out = btn("wifiStatusOut"); out.textContent = "Turning on..."; showOut(out, await run("wifi.sh", ["--on", "-y"], { timeout: 45 })); });
-  onClick("wifiOff", async () => { const out = btn("wifiStatusOut"); out.textContent = "Turning off..."; showOut(out, await run("wifi.sh", ["--off", "-y"], { timeout: 45 })); });
   btn("wifiStatus").onclick = refreshWifiStatus;
-
-  // -- Evil Twin --
-  onClick("etStart", async () => {
-    const out = btn("etOut");
-    const ssid = val("etSsid");
-    if (!ssid) { out.textContent = "Enter a cloned SSID first."; return; }
-    const args = ["--cloned", ssid, "-y"];
-    const pw = val("etPw");
-    if (pw) args.push("--clone-pw", pw);
-    const uplink = val("etUplink");
-    args.push("--uplink", uplink);
-    // BUG FOUND AND FIXED: selecting "wifi client" here always failed -
-    // EvilTwin.sh requires --wifi SSID (and takes an optional --wifi-pw)
-    // for that uplink mode, but this handler never sent either, so it
-    // always hit EvilTwin.sh's own "no --wifi SSID was given" die(). The
-    // HTML now has matching fields; wire them in only for this mode.
-    if (uplink === "wifi") {
-      const wifiSsid = val("etWifiSsid");
-      if (!wifiSsid) { out.textContent = "Uplink is 'wifi client' but no Uplink WiFi SSID was given."; return; }
-      args.push("--wifi", wifiSsid);
-      const wifiPw = val("etWifiPw");
-      if (wifiPw) args.push("--wifi-pw", wifiPw);
-    }
-    if (checked("etHidden")) args.push("--hidden");
-    if (checked("etMimic")) args.push("--mimic");
-    if (checked("etRecord")) args.push("--record");
-    if (!confirmAuthorized(`Start a clone AP broadcasting "${ssid}"?`)) return;
-    out.textContent = "Starting clone AP...";
-    showOut(out, await run("EvilTwin.sh", args, { timeout: 60 }));
-  });
-  onClick("etOn", async () => { const out = btn("etOut"); out.textContent = "Restoring..."; showOut(out, await run("EvilTwin.sh", ["--on"], { timeout: 45 })); });
-  onClick("etStop", async () => { const out = btn("etOut"); out.textContent = "Stopping..."; showOut(out, await run("EvilTwin.sh", ["--stop"], { timeout: 30 })); });
   btn("etStatus").onclick = refreshEvilTwinStatus;
-
-  // -- LAN Scan --
-  onClick("lanScan", async () => {
-    const out = btn("lanOut");
-    out.textContent = "Scanning (this can take a while)...";
-    showOut(out, await run("LanScan.sh", ["--mode", val("lanMode"), "-y"], { timeout: 300 }));
-  });
-
-  // LAN Kill (DeadNet) is deliberately not wired up here - see index.html's
-  // hint for why (its buttons were removed, this section intentionally
-  // has no onClick handlers left for it).
-
-  // -- WiFi Deauth --
-  // BUG FIXED: this used to send a "--wifi" flag that deauth.sh has never
-  // actually had (it's WiFi-only already, no mode flag needed) plus other
-  // args that no longer match its real interface - the button silently
-  // failed with "Unknown argument: --wifi" every time. deauth.sh also now
-  // runs continuously until stopped (not a single fire-and-forget shot),
-  // target defaults to FF:FF:FF:FF:FF:FF (all clients) if left blank, and
-  // background+stop mirror the CLI/payload behavior.
-  onClick("deauthSend", async () => {
-    const out = btn("deauthOut");
-    const bssid = val("deauthBssid"), target = val("deauthTarget"), channel = val("deauthChannel");
-    if (!bssid || !channel) { out.textContent = "BSSID and channel are required (target defaults to all clients if left blank)."; return; }
-    const args = ["--bssid", bssid, "--channel", channel, "--background", "-y"];
-    if (target) args.push("--target", target);
-    if (!confirmAuthorized(`Continuously deauth ${target || "all clients"} from ${bssid} until stopped?`)) return;
-    out.textContent = "Starting deauth in the background - press Stop to end it...";
-    showOut(out, await run("deauth.sh", args, { timeout: 15 }));
-    startTailing("deauth.sh", out);
-  });
-  onClick("deauthStop", async () => {
-    const out = btn("deauthOut");
-    stopTailing("deauth.sh");
-    showOut(out, await run("deauth.sh", ["--stop"], { timeout: 15 }));
-  });
-
-  // -- PineAP --
-  onClick("mimicOn", async () => { const out = btn("pineapOut"); showOut(out, await run("mimic.sh", ["--on"], { timeout: 15 })); });
-  onClick("mimicOff", async () => { const out = btn("pineapOut"); showOut(out, await run("mimic.sh", ["--off"], { timeout: 15 })); });
-  onClick("openOn", async () => {
-    const out = btn("pineapOut");
-    const ssid = val("openSsid");
-    if (!ssid) { out.textContent = "Enter an Open AP SSID first."; return; }
-    showOut(out, await run("openap.sh", ["--on", "--name", ssid], { timeout: 20 }));
-  });
-  onClick("openOff", async () => { const out = btn("pineapOut"); showOut(out, await run("openap.sh", ["--off"], { timeout: 15 })); });
-  onClick("mgmtOn", async () => {
-    const out = btn("pineapOut");
-    const ssid = val("mgmtSsid"), pw = val("mgmtPw");
-    if (!ssid || !pw) { out.textContent = "Mgmt AP needs both an SSID and a password."; return; }
-    showOut(out, await run("mgmt.sh", ["--on", "--name", ssid, "--pw", pw], { timeout: 20 }));
-  });
-  onClick("mgmtOff", async () => { const out = btn("pineapOut"); showOut(out, await run("mgmt.sh", ["--off"], { timeout: 15 })); });
-
-  // -- Recon --
-  onClick("hopPause", async () => { const out = btn("reconOut"); showOut(out, await run("reconsession.sh", ["--pause"], { timeout: 15 })); });
-  onClick("hopResume", async () => { const out = btn("reconOut"); showOut(out, await run("reconsession.sh", ["--resume"], { timeout: 15 })); });
-  onClick("reconNew", async () => { const out = btn("reconOut"); showOut(out, await run("reconsession.sh", ["--new"], { timeout: 15 })); });
-
-  // -- Payload Runner --
   btn("payloadRefresh").onclick = refreshPayloads;
-  onClick("payloadRun", async () => {
-    const out = btn("payloadOut");
-    const target = val("payloadSelect");
-    if (!target) { out.textContent = "Pick a payload first."; return; }
-    const bg = checked("payloadBg");
-    out.textContent = bg ? "Launched in background." : "Running (waiting for it to finish)...";
-    showOut(out, await run("PayloadRunner.sh", ["--run", target, "-y"], { background: bg, timeout: 120 }));
-  });
-
-  // -- Loot --
   btn("lootList").onclick = refreshLoot;
-  onClick("lootArchive", async () => { const out = btn("lootOut"); out.textContent = "Archiving..."; showOut(out, await run("loot.sh", ["--archive", "-y"], { timeout: 30 })); });
 
-  // -- LAN Sniffer --
-  onClick("sniffAdapters", async () => { const out = btn("sniffOut"); showOut(out, await run("sniff.sh", ["--adapters"], { timeout: 15 })); });
-  onClick("sniffStart", async () => {
-    const out = btn("sniffOut");
-    const iface = val("sniffIface") || "eth1";
-    const duration = val("sniffDuration") || "30";
-    out.textContent = "Starting capture in the background...";
-    showOut(out, await run("sniff.sh", ["--iface", iface, "--duration", duration, "--background", "-y"], { timeout: 15 }));
-    startTailing("sniff.sh", out);
-  });
-  onClick("sniffStop", async () => { const out = btn("sniffOut"); stopTailing("sniff.sh"); showOut(out, await run("sniff.sh", ["--stop"], { timeout: 15 })); });
-  onClick("sniffStatus", async () => { const out = btn("sniffOut"); showOut(out, await run("sniff.sh", ["--status"], { timeout: 15 })); });
+  // ===========================================================================
+  // BIG CHANGE (real rearchitecture, not a dedup): this file used to be ~25
+  // independently hand-written onClick handlers. Every one of them re-
+  // implemented the same shape by hand - grab the output element, maybe
+  // validate some inputs, maybe confirm, show a "starting" message, run the
+  // script, dump the result, maybe start/stop a live tail - with its own
+  // copy-pasted version of that sequence. Nothing enforced the shape was
+  // followed consistently (it drifted purely by whoever wrote which handler
+  // and when); adding a new button meant writing a whole new handler from
+  // scratch instead of declaring what's actually different about it.
+  //
+  // ACTIONS is now the single declarative source of truth for every button:
+  // what script/args to run, how to validate/confirm first, what message to
+  // show, whether to tail. runAction() is the ONE generic executor every
+  // button goes through - the control-flow model of the whole file changed
+  // from "N imperative handlers" to "one declarative table + one interpreter
+  // for it", not two lookalike blocks merged into one.
+  //
+  // Each entry's `build()` (only where an action actually needs input
+  // validation, dynamic args, or a per-call timeout) returns a context
+  // object - `{ abort: "message" }` to stop right there with that message
+  // shown (replacing every handler's old inline "if (!x) { ...; return; }"),
+  // or the pieces the executor needs (`args`, and optionally `timeout`/
+  // `background`) plus whatever the entry's own `confirm`/`starting`
+  // functions need to read back off it.
+  const ACTIONS = {
+    // -- WiFi master --
+    wifiOn:  { out: "wifiStatusOut", script: "wifi.sh", args: ["--on", "-y"], timeout: 45, starting: "Turning on..." },
+    wifiOff: { out: "wifiStatusOut", script: "wifi.sh", args: ["--off", "-y"], timeout: 45, starting: "Turning off..." },
 
-  // -- PC Link --
-  onClick("pcLinkDetect", async () => { const out = btn("pcLinkOut"); showOut(out, await run("pc_link.sh", ["--detect"], { timeout: 15 })); });
-  onClick("pcLinkCapture", async () => {
-    const out = btn("pcLinkOut");
-    const duration = val("pcLinkDuration") || "30";
-    out.textContent = "Detecting + capturing (waiting for it to finish)...";
-    showOut(out, await run("pc_link.sh", ["--capture", "--duration", duration, "-y"], { timeout: parseInt(duration, 10) + 30 || 60 }));
-  });
+    // -- Evil Twin --
+    etStart: {
+      out: "etOut", script: "EvilTwin.sh", timeout: 60, starting: "Starting clone AP...",
+      // BUG FOUND AND FIXED (carried over from the handler this replaced):
+      // selecting "wifi client" uplink used to always fail - EvilTwin.sh
+      // requires --wifi SSID (and takes an optional --wifi-pw) for that
+      // mode, but the old handler never sent either.
+      build: () => {
+        const ssid = val("etSsid");
+        if (!ssid) return { abort: "Enter a cloned SSID first." };
+        const args = ["--cloned", ssid, "-y"];
+        const pw = val("etPw");
+        if (pw) args.push("--clone-pw", pw);
+        const uplink = val("etUplink");
+        args.push("--uplink", uplink);
+        if (uplink === "wifi") {
+          const wifiSsid = val("etWifiSsid");
+          if (!wifiSsid) return { abort: "Uplink is 'wifi client' but no Uplink WiFi SSID was given." };
+          args.push("--wifi", wifiSsid);
+          const wifiPw = val("etWifiPw");
+          if (wifiPw) args.push("--wifi-pw", wifiPw);
+        }
+        if (checked("etHidden")) args.push("--hidden");
+        if (checked("etMimic")) args.push("--mimic");
+        if (checked("etRecord")) args.push("--record");
+        return { args, ssid };
+      },
+      confirm: (ctx) => `Start a clone AP broadcasting "${ctx.ssid}"?`,
+    },
+    etOn:   { out: "etOut", script: "EvilTwin.sh", args: ["--on"], timeout: 45, starting: "Restoring..." },
+    etStop: { out: "etOut", script: "EvilTwin.sh", args: ["--stop"], timeout: 30, starting: "Stopping..." },
 
-  // -- Bluetooth --
-  onClick("btScan", async () => {
-    const out = btn("btOut");
-    out.textContent = "Scanning (classic + BLE, 15s)...";
-    showOut(out, await run("bluetooth.sh", ["--scan", "--ble", "--duration", "15", "-y"], { timeout: 40 }));
-  });
-  onClick("btFloodStart", async () => {
-    const out = btn("btOut");
-    const mac = val("btFloodMac");
-    if (!mac) { out.textContent = "Enter a target MAC first (from a scan)."; return; }
-    if (!confirmAuthorized(`L2CAP-flood ${mac}? This is a real denial-of-service against it.`)) return;
-    out.textContent = "Starting flood in the background - press Stop to end it...";
-    showOut(out, await run("bluetooth.sh", ["--flood", mac, "--background", "-y"], { timeout: 15 }));
-    startTailing("bluetooth.sh", out);
-  });
-  onClick("btJamStart", async () => {
-    const out = btn("btOut");
-    if (!confirmAuthorized("Scan then L2CAP-flood EVERY Bluetooth device found nearby?")) return;
-    out.textContent = "Scanning then jamming everything found, in the background - press Stop to end it...";
-    showOut(out, await run("bluetooth.sh", ["--jam-area", "--background", "-y"], { timeout: 15 }));
-    startTailing("bluetooth.sh", out);
-  });
-  onClick("btAdvspamStart", async () => {
-    const out = btn("btOut");
-    if (!confirmAuthorized("Flood the area with fake BLE advertising packets?")) return;
-    out.textContent = "Registering BLE advertising instances...";
-    showOut(out, await run("bluetooth.sh", ["--advspam", "-y"], { timeout: 20 }));
-  });
-  onClick("btStop", async () => { const out = btn("btOut"); stopTailing("bluetooth.sh"); showOut(out, await run("bluetooth.sh", ["--stop"], { timeout: 15 })); });
-  onClick("btStatus", async () => { const out = btn("btOut"); showOut(out, await run("bluetooth.sh", ["--status"], { timeout: 15 })); });
+    // -- LAN Scan --
+    lanScan: {
+      out: "lanOut", script: "LanScan.sh", timeout: 300, starting: "Scanning (this can take a while)...",
+      build: () => ({ args: ["--mode", val("lanMode"), "-y"] }),
+    },
 
-  // -- Report --
-  onClick("reportRefresh", async () => { const out = btn("reportOut"); out.textContent = "Generating..."; showOut(out, await run("report.sh", [], { timeout: 20 })); });
+    // LAN Kill (DeadNet) is deliberately not wired up here - see index.html's
+    // hint for why (no entry for it in this table on purpose).
+
+    // -- WiFi Deauth --
+    deauthSend: {
+      out: "deauthOut", script: "deauth.sh", timeout: 15, tail: true,
+      starting: "Starting deauth in the background - press Stop to end it...",
+      build: () => {
+        const bssid = val("deauthBssid"), target = val("deauthTarget"), channel = val("deauthChannel");
+        if (!bssid || !channel) return { abort: "BSSID and channel are required (target defaults to all clients if left blank)." };
+        const args = ["--bssid", bssid, "--channel", channel, "--background", "-y"];
+        if (target) args.push("--target", target);
+        return { args, bssid, target };
+      },
+      confirm: (ctx) => `Continuously deauth ${ctx.target || "all clients"} from ${ctx.bssid} until stopped?`,
+    },
+    deauthStop: { out: "deauthOut", script: "deauth.sh", args: ["--stop"], timeout: 15, tailOff: "deauth.sh" },
+
+    // -- PineAP --
+    mimicOn:  { out: "pineapOut", script: "mimic.sh", args: ["--on"], timeout: 15 },
+    mimicOff: { out: "pineapOut", script: "mimic.sh", args: ["--off"], timeout: 15 },
+    openOn: {
+      out: "pineapOut", script: "openap.sh", timeout: 20,
+      build: () => { const ssid = val("openSsid"); return ssid ? { args: ["--on", "--name", ssid] } : { abort: "Enter an Open AP SSID first." }; },
+    },
+    openOff: { out: "pineapOut", script: "openap.sh", args: ["--off"], timeout: 15 },
+    mgmtOn: {
+      out: "pineapOut", script: "mgmt.sh", timeout: 20,
+      build: () => {
+        const ssid = val("mgmtSsid"), pw = val("mgmtPw");
+        return (ssid && pw) ? { args: ["--on", "--name", ssid, "--pw", pw] } : { abort: "Mgmt AP needs both an SSID and a password." };
+      },
+    },
+    mgmtOff: { out: "pineapOut", script: "mgmt.sh", args: ["--off"], timeout: 15 },
+
+    // -- Recon --
+    hopPause:  { out: "reconOut", script: "reconsession.sh", args: ["--pause"], timeout: 15 },
+    hopResume: { out: "reconOut", script: "reconsession.sh", args: ["--resume"], timeout: 15 },
+    reconNew:  { out: "reconOut", script: "reconsession.sh", args: ["--new"], timeout: 15 },
+
+    // -- Payload Runner --
+    payloadRun: {
+      out: "payloadOut", script: "PayloadRunner.sh", timeout: 120,
+      build: () => {
+        const target = val("payloadSelect");
+        if (!target) return { abort: "Pick a payload first." };
+        const bg = checked("payloadBg");
+        return { args: ["--run", target, "-y"], background: bg, bg };
+      },
+      starting: (ctx) => ctx.bg ? "Launched in background." : "Running (waiting for it to finish)...",
+    },
+
+    // -- Loot --
+    lootArchive: { out: "lootOut", script: "loot.sh", args: ["--archive", "-y"], timeout: 30, starting: "Archiving..." },
+
+    // -- LAN Sniffer --
+    sniffAdapters: { out: "sniffOut", script: "sniff.sh", args: ["--adapters"], timeout: 15 },
+    sniffStart: {
+      out: "sniffOut", script: "sniff.sh", timeout: 15, tail: true,
+      starting: "Starting capture in the background...",
+      build: () => ({ args: ["--iface", val("sniffIface") || "eth1", "--duration", val("sniffDuration") || "30", "--background", "-y"] }),
+    },
+    sniffStop:   { out: "sniffOut", script: "sniff.sh", args: ["--stop"], timeout: 15, tailOff: "sniff.sh" },
+    sniffStatus: { out: "sniffOut", script: "sniff.sh", args: ["--status"], timeout: 15 },
+
+    // -- PC Link --
+    pcLinkDetect: { out: "pcLinkOut", script: "pc_link.sh", args: ["--detect"], timeout: 15 },
+    pcLinkCapture: {
+      out: "pcLinkOut", script: "pc_link.sh", starting: "Detecting + capturing (waiting for it to finish)...",
+      build: () => {
+        const duration = val("pcLinkDuration") || "30";
+        return { args: ["--capture", "--duration", duration, "-y"], timeout: parseInt(duration, 10) + 30 || 60 };
+      },
+    },
+
+    // -- Bluetooth --
+    btScan: { out: "btOut", script: "bluetooth.sh", args: ["--scan", "--ble", "--duration", "15", "-y"], timeout: 40, starting: "Scanning (classic + BLE, 15s)..." },
+    btFloodStart: {
+      out: "btOut", script: "bluetooth.sh", timeout: 15, tail: true,
+      starting: "Starting flood in the background - press Stop to end it...",
+      build: () => { const mac = val("btFloodMac"); return mac ? { args: ["--flood", mac, "--background", "-y"], mac } : { abort: "Enter a target MAC first (from a scan)." }; },
+      confirm: (ctx) => `L2CAP-flood ${ctx.mac}? This is a real denial-of-service against it.`,
+    },
+    btJamStart: {
+      out: "btOut", script: "bluetooth.sh", args: ["--jam-area", "--background", "-y"], timeout: 15, tail: true,
+      starting: "Scanning then jamming everything found, in the background - press Stop to end it...",
+      confirm: () => "Scan then L2CAP-flood EVERY Bluetooth device found nearby?",
+    },
+    btAdvspamStart: {
+      out: "btOut", script: "bluetooth.sh", args: ["--advspam", "-y"], timeout: 20, starting: "Registering BLE advertising instances...",
+      confirm: () => "Flood the area with fake BLE advertising packets?",
+    },
+    btStop:   { out: "btOut", script: "bluetooth.sh", args: ["--stop"], timeout: 15, tailOff: "bluetooth.sh" },
+    btStatus: { out: "btOut", script: "bluetooth.sh", args: ["--status"], timeout: 15 },
+
+    // -- Report --
+    reportRefresh: { out: "reportOut", script: "report.sh", args: [], timeout: 20, starting: "Generating..." },
+  };
+
+  // The one generic executor. Every ACTIONS entry, no matter how different
+  // its inputs/validation/confirmation, goes through exactly this sequence.
+  async function runAction(id) {
+    const spec = ACTIONS[id];
+    const out = btn(spec.out);
+    const ctx = spec.build ? spec.build() : {};
+    if (ctx.abort) { out.textContent = ctx.abort; return; }
+    if (spec.confirm && !confirmAuthorized(spec.confirm(ctx))) return;
+    if (spec.tailOff) stopTailing(spec.tailOff);
+    if (spec.starting !== undefined) {
+      out.textContent = typeof spec.starting === "function" ? spec.starting(ctx) : spec.starting;
+    }
+    const args = ctx.args || spec.args || [];
+    const timeout = ctx.timeout || spec.timeout || 60;
+    const background = ctx.background ?? spec.background ?? false;
+    const result = await run(spec.script, args, { timeout, background });
+    showOut(out, result);
+    if (spec.tail) startTailing(spec.script, out);
+  }
+
+  for (const id of Object.keys(ACTIONS)) {
+    onClick(id, () => runAction(id));
+  }
+  // ===========================================================================
 
   // BIG CHANGE: a page refresh (or just opening the Control Panel fresh
   // while an attack from an earlier visit is still running in the

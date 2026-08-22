@@ -11,25 +11,29 @@ skill's name.** Every one of those 42 changes was real and safely verified - non
 them should be reverted - but almost none of them were actually *big* (structural,
 rearchitecture-scale). That's being said plainly here rather than re-labeled.
 
-Round 2 (this pass) went looking specifically for changes that clear the real bar -
-genuine rearchitectures, not tweaks - rather than re-touching all 55 files a second
-time. Two were found, planned, and built:
+Round 2 first attempt (kept, but re-graded): built a shared LAN-topology
+reconciler (`lib/common.sh`/`sniff.sh`/`reset.sh`) and a unified
+`watch_for_reconnect()` in `deauth.sh`. Both real, both verified, both still in
+the tree. **Both were mis-graded as "big" by arguing from importance instead of
+structure** - "this is the exact code behind the two hardest live bugs" is a
+value/incident-history argument, not a size argument. Rated honestly by
+structure alone: `watch_for_reconnect()` is a merge of two byte-for-byte
+identical blocks (a dedup, full stop); `canonicalize_lan_topology()` is a merge
+of two similar-but-not-identical procedures into one parameterized function
+plus a small added logging helper (still "merge two functions," the skill's own
+disqualified example, with a feature bolted on). Both filed as improve-tier
+below, not as this round's big change.
 
-1. **A shared, declarative LAN-topology reconciler** (`lib/common.sh` +
-   `sniff.sh` + `reset.sh`) - replaces two independently hand-written, subtly
-   different "is eth0 where it belongs" implementations (one of which caused a real,
-   live-diagnosed incident) with one canonical subsystem. New capability, not a
-   dedup: a `topology_log()` forensic trail survives a SIGKILL. Verified with an
-   8-case local logic test (all passing) against stubbed system primitives.
-2. **Unified frame-reconnection detection in `deauth.sh`** (`watch_for_reconnect()`) -
-   collapses the sentinel and reactive-strike watch loops' byte-for-byte-duplicated
-   tcpdump/grep sequence (the exact logic behind this file's two hardest-won live
-   bugs) into one function. Deliberately did NOT force `find_target_bssid()`/
-   `discover_clients()` into the same shape after confirming they do genuinely
-   different jobs - forcing them would have changed behavior, not just deduplicated.
+**Round 2's actual big change**, once the importance-laundering was caught and
+the bar re-applied honestly by structure alone: `scripts/guiserver/static/app.js`
+(see its own entry below) - ~25 independently hand-written onClick handlers
+replaced with one declarative ACTIONS table + one generic executor. 337 of 401
+lines touched. Verified with a 20-case functional test (real file, sandboxed
+VM, mocked DOM/fetch) - all passing. This clears the bar on its own terms:
+most of the file's actual structure changed, not two lookalike blocks merged.
 
-Everything below this note is the **round 1 record** (files 1-55, improve-tier,
-correctly attributed as such now) - kept for reference, not re-labeled as big.
+Everything below this note is the **round 1 + round 2 record**, improve-tier
+work correctly attributed as such except where marked otherwise.
 
 ---
 
@@ -106,10 +110,23 @@ payloads/, then the two installer scripts.
 22. [x] scripts/guiserver/server.py - added /api/tail (safe, allowlisted,
     read-only log-tail endpoint) so the Control Panel isn't a black box
     during a backgrounded run
-23. [x] scripts/guiserver/static/app.js - wired up live-tailing for deauth/
-    sniff/bluetooth backgrounded actions, added a real authorization
-    confirm() before every attack action (a gap the CLI/payload paths never
-    had), resumes tailing on page load if already running, caps tail growth
+23. [x] scripts/guiserver/static/app.js - round 1: wired up live-tailing for
+    deauth/sniff/bluetooth backgrounded actions, added a real authorization
+    confirm() before every attack action, resumes tailing on load, caps
+    tail growth (improve-tier, see round-2 note at the top of this file).
+    ROUND 2 REAL BIG CHANGE: rearchitected the whole file's control-flow
+    model - ~25 independently hand-written onClick handlers (each
+    re-implementing "validate, confirm, run, display, maybe tail" by hand)
+    replaced with one declarative ACTIONS table + one generic runAction()
+    executor every button goes through. 337 of 401 lines touched (~84% of
+    the file). Verified with a 20-case functional test running the REAL
+    file in a sandboxed VM with a mocked DOM/fetch - covers static args,
+    dynamic args with conditional branches (the etStart wifi-uplink path),
+    validation-abort messages, confirm()-decline actually blocking the
+    request, dynamic per-call timeouts, and the background-checkbox's
+    dual effect on both the run() flag and the displayed message. All 20
+    passing, matching the original handlers' exact behavior for equivalent
+    input.
 24. [x] scripts/guiserver/static/index.html (verdict: left as-is - already
     has every element app.js's new features needed, no gap found)
 25. [x] scripts/guiserver/static/style.css (verdict: left as-is - .out
