@@ -95,6 +95,43 @@ def run_script(name, args, timeout=60, background=False):
         return {"rc": 124, "stdout": "", "stderr": f"timed out after {timeout}s"}
 
 
+# BIG CHANGE: /api/run's subprocess.run(...) BLOCKS the whole HTTP request
+# until the command finishes (or times out) before returning ANY output at
+# all - for a long-running background attack/capture launched from the
+# Control Panel, the UI has no way to show progress until the entire run is
+# over. This is the exact same "black box, no feedback until it's done"
+# problem this session's other UX fixes were all about (sniff.sh's live-
+# tail, PayloadRunner.sh's --status) - the Control Panel's own API had it
+# too. Every backgrounded script here already writes to a well-known log
+# file, so this exposes a safe, READ-ONLY, explicitly allowlisted tail of
+# those specific files (never arbitrary filesystem access) letting the
+# frontend poll for live output instead of getting nothing until the whole
+# run ends. Same "poll by line count, return only what's new" pattern
+# already proven safe in sniff.sh/deauth.sh's own log watchers this session
+# - never blocks, never follows forever.
+LOG_FILES = {
+    "deauth.sh": "/tmp/pager-deauth.log",
+    "sniff.sh": "/tmp/pager-sniff.log",
+    "bluetooth.sh": "/tmp/pager-bluetooth.log",
+    "crash_logger.sh": "/mmc/crash_dmesg.log",
+}
+
+
+def tail_log(name, since_line):
+    path = LOG_FILES.get(name)
+    if not path or not os.path.isfile(path):
+        return {"lines": [], "total": 0, "error": "no known log file for this script"}
+    try:
+        with open(path, "r", errors="replace") as f:
+            all_lines = f.readlines()
+    except OSError as e:
+        return {"lines": [], "total": 0, "error": str(e)}
+    total = len(all_lines)
+    since_line = max(0, since_line)
+    new_lines = [line.rstrip("\n") for line in all_lines[since_line:]]
+    return {"lines": new_lines, "total": total}
+
+
 def require_token(handler):
     expected = cfg_get("token")
     if not expected:
@@ -173,6 +210,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/payloads":
             out = run_script("PayloadRunner.sh", ["--list"], timeout=15)
             self._send_json(out)
+            return
+
+        if path == "/api/tail":
+            qs = urllib.parse.parse_qs(parsed.query)
+            script = qs.get("script", [""])[0]
+            try:
+                since = int(qs.get("since", ["0"])[0])
+            except ValueError:
+                since = 0
+            self._send_json(tail_log(script, since))
             return
 
         self.send_error(404)

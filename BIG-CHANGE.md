@@ -69,11 +69,18 @@ payloads/, then the two installer scripts.
     found in the process (a typo'd device/network silently fell back to
     "network" before; now a clear error)
 20. [x] scripts/gps.sh (verdict: left as-is - trivial, already hardened)
-21. [ ] scripts/gui
-22. [ ] scripts/guiserver/server.py
-23. [ ] scripts/guiserver/static/app.js
-24. [ ] scripts/guiserver/static/index.html
-25. [ ] scripts/guiserver/static/style.css
+21. [x] scripts/gui (verdict: left as-is - trivial launcher, already correct)
+22. [x] scripts/guiserver/server.py - added /api/tail (safe, allowlisted,
+    read-only log-tail endpoint) so the Control Panel isn't a black box
+    during a backgrounded run
+23. [x] scripts/guiserver/static/app.js - wired up live-tailing for deauth/
+    sniff/bluetooth backgrounded actions, added a real authorization
+    confirm() before every attack action (a gap the CLI/payload paths never
+    had), resumes tailing on page load if already running, caps tail growth
+24. [x] scripts/guiserver/static/index.html (verdict: left as-is - already
+    has every element app.js's new features needed, no gap found)
+25. [x] scripts/guiserver/static/style.css (verdict: left as-is - .out
+    already has max-height/overflow-y:auto, no gap found)
 26. [ ] scripts/help
 27. [ ] scripts/led.sh
 28. [ ] scripts/loot.sh

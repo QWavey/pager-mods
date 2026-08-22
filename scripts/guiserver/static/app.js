@@ -31,6 +31,61 @@
     el.textContent = lines.join("\n") || "(no output)";
   }
 
+  // BIG CHANGE: pairs with server.py's new /api/tail endpoint. Every
+  // --background-launched action here (deauth, sniff, bluetooth flood/jam)
+  // used to show a static "Starting..." message with NO further feedback
+  // until you manually pressed its Status button - the exact "black box,
+  // no visible progress" problem this whole toolkit's other UX fixes this
+  // session were about (sniff.sh's own live-tail, PayloadRunner.sh's
+  // --status). Polls the script's known log file every 1.5s and appends
+  // only the lines that are actually new (never re-fetches the whole log),
+  // same bounded-poll pattern the server-side endpoint itself uses - no
+  // long-lived connection, nothing left running if you navigate away
+  // (starting a new tail always clears any previous one first).
+  const tailers = {}; // scriptName -> interval id
+  function stopTailing(script) {
+    if (tailers[script]) { clearInterval(tailers[script]); delete tailers[script]; }
+  }
+  const MAX_TAIL_LINES = 500; // cap growth for a long unattended engagement
+  function startTailing(script, outEl) {
+    stopTailing(script);
+    let since = 0;
+    tailers[script] = setInterval(async () => {
+      try {
+        const r = await api(`/api/tail?script=${encodeURIComponent(script)}&since=${since}`);
+        if (r.lines && r.lines.length) {
+          outEl.textContent += (outEl.textContent ? "\n" : "") + r.lines.join("\n");
+          // Same "guard against unbounded growth over a long unattended
+          // run" principle applied elsewhere in this toolkit (crash_logger's
+          // ring-buffer handling, sniff.sh's watchers) - .out is visually
+          // scrollable already (see style.css), but the underlying
+          // textContent string itself had no cap, so a multi-hour tailed
+          // session would keep growing this DOM node's text forever.
+          const allLines = outEl.textContent.split("\n");
+          if (allLines.length > MAX_TAIL_LINES) {
+            outEl.textContent = allLines.slice(allLines.length - MAX_TAIL_LINES).join("\n");
+          }
+          outEl.scrollTop = outEl.scrollHeight;
+        }
+        if (typeof r.total === "number") since = r.total;
+      } catch (e) { /* transient network hiccup - keep trying, don't stop the whole tail over one dropped poll */ }
+    }, 1500);
+  }
+
+  // BUG FOUND AND FIXED (found via code review): every one of these attack
+  // actions (deauth, bluetooth flood/jam/adv-spam, evil-twin clone) passes
+  // "-y" to skip that script's own "only run this against networks/
+  // devices you're authorized to test" confirmation - the CLI and payload
+  // paths ALWAYS show that prompt first; the Control Panel silently
+  // bypassed it entirely with no substitute, the one place in this whole
+  // toolkit where that guardrail didn't exist at all. A plain native
+  // confirm() before firing is the same authorization gate every other
+  // entry point already has, just implemented for a browser button instead
+  // of a terminal prompt.
+  function confirmAuthorized(message) {
+    return window.confirm(message + "\n\nOnly run this against networks/devices you are authorized to test.");
+  }
+
   function btn(id) { return document.getElementById(id); }
   function val(id) { return document.getElementById(id).value; }
   function checked(id) { return document.getElementById(id).checked; }
@@ -144,6 +199,7 @@
     if (checked("etHidden")) args.push("--hidden");
     if (checked("etMimic")) args.push("--mimic");
     if (checked("etRecord")) args.push("--record");
+    if (!confirmAuthorized(`Start a clone AP broadcasting "${ssid}"?`)) return;
     out.textContent = "Starting clone AP...";
     showOut(out, await run("EvilTwin.sh", args, { timeout: 60 }));
   });
@@ -176,11 +232,14 @@
     if (!bssid || !channel) { out.textContent = "BSSID and channel are required (target defaults to all clients if left blank)."; return; }
     const args = ["--bssid", bssid, "--channel", channel, "--background", "-y"];
     if (target) args.push("--target", target);
+    if (!confirmAuthorized(`Continuously deauth ${target || "all clients"} from ${bssid} until stopped?`)) return;
     out.textContent = "Starting deauth in the background - press Stop to end it...";
     showOut(out, await run("deauth.sh", args, { timeout: 15 }));
+    startTailing("deauth.sh", out);
   });
   onClick("deauthStop", async () => {
     const out = btn("deauthOut");
+    stopTailing("deauth.sh");
     showOut(out, await run("deauth.sh", ["--stop"], { timeout: 15 }));
   });
 
@@ -230,8 +289,9 @@
     const duration = val("sniffDuration") || "30";
     out.textContent = "Starting capture in the background...";
     showOut(out, await run("sniff.sh", ["--iface", iface, "--duration", duration, "--background", "-y"], { timeout: 15 }));
+    startTailing("sniff.sh", out);
   });
-  onClick("sniffStop", async () => { const out = btn("sniffOut"); showOut(out, await run("sniff.sh", ["--stop"], { timeout: 15 })); });
+  onClick("sniffStop", async () => { const out = btn("sniffOut"); stopTailing("sniff.sh"); showOut(out, await run("sniff.sh", ["--stop"], { timeout: 15 })); });
   onClick("sniffStatus", async () => { const out = btn("sniffOut"); showOut(out, await run("sniff.sh", ["--status"], { timeout: 15 })); });
 
   // -- PC Link --
@@ -253,24 +313,46 @@
     const out = btn("btOut");
     const mac = val("btFloodMac");
     if (!mac) { out.textContent = "Enter a target MAC first (from a scan)."; return; }
+    if (!confirmAuthorized(`L2CAP-flood ${mac}? This is a real denial-of-service against it.`)) return;
     out.textContent = "Starting flood in the background - press Stop to end it...";
     showOut(out, await run("bluetooth.sh", ["--flood", mac, "--background", "-y"], { timeout: 15 }));
+    startTailing("bluetooth.sh", out);
   });
   onClick("btJamStart", async () => {
     const out = btn("btOut");
+    if (!confirmAuthorized("Scan then L2CAP-flood EVERY Bluetooth device found nearby?")) return;
     out.textContent = "Scanning then jamming everything found, in the background - press Stop to end it...";
     showOut(out, await run("bluetooth.sh", ["--jam-area", "--background", "-y"], { timeout: 15 }));
+    startTailing("bluetooth.sh", out);
   });
   onClick("btAdvspamStart", async () => {
     const out = btn("btOut");
+    if (!confirmAuthorized("Flood the area with fake BLE advertising packets?")) return;
     out.textContent = "Registering BLE advertising instances...";
     showOut(out, await run("bluetooth.sh", ["--advspam", "-y"], { timeout: 20 }));
   });
-  onClick("btStop", async () => { const out = btn("btOut"); showOut(out, await run("bluetooth.sh", ["--stop"], { timeout: 15 })); });
+  onClick("btStop", async () => { const out = btn("btOut"); stopTailing("bluetooth.sh"); showOut(out, await run("bluetooth.sh", ["--stop"], { timeout: 15 })); });
   onClick("btStatus", async () => { const out = btn("btOut"); showOut(out, await run("bluetooth.sh", ["--status"], { timeout: 15 })); });
 
   // -- Report --
   onClick("reportRefresh", async () => { const out = btn("reportOut"); out.textContent = "Generating..."; showOut(out, await run("report.sh", [], { timeout: 20 })); });
+
+  // BIG CHANGE: a page refresh (or just opening the Control Panel fresh
+  // while an attack from an earlier visit is still running in the
+  // background) used to lose live output entirely - the tailer only ever
+  // started right after a button click, so you'd have to remember to
+  // press Status manually to even notice something was still running.
+  // Checks each backgrounded script's real status on load and resumes
+  // tailing automatically if it's already active.
+  async function resumeTailingIfRunning(script, outEl) {
+    try {
+      const r = await run(script, ["--status"], { timeout: 10 });
+      if (r.stdout && /running/i.test(r.stdout)) {
+        outEl.textContent = (outEl.textContent ? outEl.textContent + "\n" : "") + "-- already running, resuming live output --";
+        startTailing(script, outEl);
+      }
+    } catch (e) { /* ignore - not critical, worst case is the same as before this change */ }
+  }
 
   // Initial load
   if (!token) {
@@ -282,6 +364,9 @@
     refreshEvilTwinStatus();
     refreshPayloads();
     refreshLoot();
+    resumeTailingIfRunning("deauth.sh", btn("deauthOut"));
+    resumeTailingIfRunning("sniff.sh", btn("sniffOut"));
+    resumeTailingIfRunning("bluetooth.sh", btn("btOut"));
     setInterval(refreshBattery, 30000);
   }
 })();
