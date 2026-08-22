@@ -307,7 +307,23 @@ setup_uplink() {
             fi
             say "Connecting to uplink network '$UPLINK_SSID'..."
             if [ -n "$UPLINK_PW" ]; then
-                WIFI_CONNECT wlan0cli "$UPLINK_SSID" psk2 "$UPLINK_PW" ANY || die "WIFI_CONNECT failed"
+                # BUG FOUND AND FIXED (found via code review): this hardcoded
+                # "psk2" - the exact same fragility connect.sh's own header
+                # already documents fixing for the general "connect this
+                # device's WiFi client" case ("Rather than guessing wrong and
+                # failing silently, this tries the encryption types in order
+                # ... psk2, sae-mixed, sae, psk"). A WPA3/WPA3-mixed uplink
+                # network would just fail WIFI_CONNECT outright here, with no
+                # retry, unlike connect.sh's own already-fixed logic for the
+                # identical underlying command. Same fix, same order.
+                uplink_connected=0
+                for enc in psk2 sae-mixed sae psk; do
+                    if WIFI_CONNECT wlan0cli "$UPLINK_SSID" "$enc" "$UPLINK_PW" ANY; then
+                        uplink_connected=1
+                        break
+                    fi
+                done
+                [ "$uplink_connected" = "1" ] || die "WIFI_CONNECT failed for '$UPLINK_SSID' with any of psk2/sae-mixed/sae/psk - check the password, or the network may use an unsupported/enterprise auth type."
             else
                 # "open" + "NONE" confirmed via WIFI_CONNECT --help on-device.
                 WIFI_CONNECT wlan0cli "$UPLINK_SSID" open NONE ANY || die "WIFI_CONNECT failed"
