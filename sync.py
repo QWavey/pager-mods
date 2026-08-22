@@ -83,14 +83,31 @@ def run_setup(extra_args):
 # content-hash comparison; this layer just needs to know "did anything
 # change on disk since I last looked" to decide whether to bother calling
 # setup.py at all.
+# BIG CHANGE (found via code review): this walked EVERY file under
+# scripts/ and payloads/ with no exclusions at all - including __pycache__/
+# *.pyc build artifacts, which setup.py's own upload_tree() explicitly
+# skips (a real bug that already bit this project once - a stray .pyc from
+# running `python -m py_compile`/importing server.py locally actually got
+# uploaded to the device before that fix). Without the same exclusion
+# here, --watch's definition of "changed" didn't match what setup.py
+# actually pushes - a .pyc appearing/changing would trigger a whole
+# "changes detected, pushing..." cycle for a file setup.py was always
+# going to skip anyway. Same skip list, kept in sync with setup.py's own.
+SKIP_DIRS = {"__pycache__", ".git"}
+SKIP_SUFFIXES = (".pyc", ".pyo")
+
+
 def snapshot(root):
     snap = {}
     for tree in ("scripts", "payloads"):
         base = os.path.join(root, tree)
         if not os.path.isdir(base):
             continue
-        for dirpath, _, filenames in os.walk(base):
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
             for fname in filenames:
+                if fname.endswith(SKIP_SUFFIXES):
+                    continue
                 p = os.path.join(dirpath, fname)
                 try:
                     st = os.stat(p)

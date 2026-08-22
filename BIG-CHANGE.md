@@ -166,8 +166,16 @@ payloads/, then the two installer scripts.
 53. [x] payloads/general/wifi_deauth/payload.sh - fixed the minor
     completeness gap flagged earlier this session: connected-but-no-
     recon.db no longer skips prefilling the BSSID via connected_bssid()
-54. [ ] setup.py
-55. [ ] sync.py
+54. [x] setup.py - added prune_stale_scripts(): a script deleted locally
+    (e.g. raw_deauth.py, removed as confirmed-dead code earlier this
+    sweep) used to stay on the device forever, since upload_tree() only
+    ever adds/updates, never deletes. Unit-tested locally against a fake
+    sftp/state before touching anything real - only removes paths under
+    scripts/ that state itself remembers pushing, never payload entries
+55. [x] sync.py - --watch's snapshot() now skips __pycache__/*.pyc/.pyo,
+    matching setup.py's own exclusion (the same "define changed vs what's
+    actually pushed" drift setup.py already had to fix once for the same
+    files)
 
 ---
 

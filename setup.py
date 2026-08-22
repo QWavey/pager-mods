@@ -136,6 +136,7 @@ def upload_tree(sftp, local_root, remote_root, log, state, force=False):
     SKIP_SUFFIXES = (".pyc", ".pyo")
 
     uploaded = skipped = 0
+    seen_remote_paths = set()
     for dirpath, dirnames, filenames in os.walk(local_root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         rel = os.path.relpath(dirpath, local_root)
@@ -149,6 +150,7 @@ def upload_tree(sftp, local_root, remote_root, log, state, force=False):
                 continue
             local_path = os.path.join(dirpath, fname)
             remote_path = remote_dir + "/" + fname
+            seen_remote_paths.add(remote_path)
             with open(local_path, "rb") as f:
                 content = f.read()
             normalized = content.replace(b"\r\n", b"\n")
@@ -162,7 +164,32 @@ def upload_tree(sftp, local_root, remote_root, log, state, force=False):
             log(f"  {remote_path}")
     if skipped:
         log(f"  ({skipped} file(s) unchanged since last push - skipped)")
-    return uploaded, skipped
+    return uploaded, skipped, seen_remote_paths
+
+
+# BIG CHANGE: upload_tree only ever adds/updates files - a script deleted
+# locally (e.g. raw_deauth.py, removed as confirmed-dead code earlier this
+# sweep) stayed on the device FOREVER, since nothing ever told setup.py to
+# remove anything. state tracks every remote path this tool has ever
+# pushed - anything still in there that ISN'T in the current local tree is
+# exactly that: a file this tool put there that no longer has a local
+# source. Scoped deliberately narrow and safe: only paths under
+# REMOTE_ROOT that state itself remembers uploading - never a file this
+# tool didn't put there, and never payload directories (deploy_payloads
+# tracks those separately, under a different key prefix, untouched here).
+def prune_stale_scripts(sftp, state, seen_remote_paths, log):
+    prefix = REMOTE_ROOT + "/"
+    stale = [p for p in list(state.keys()) if p.startswith(prefix) and p not in seen_remote_paths]
+    if not stale:
+        return
+    log(f"Removing {len(stale)} stale file(s) no longer in the local scripts/ tree...")
+    for p in stale:
+        try:
+            sftp.remove(p)
+            log(f"  removed {p}")
+        except IOError as e:
+            log(f"  WARNING: couldn't remove {p} (may already be gone): {e}")
+        del state[p]
 
 
 PAYLOAD_META = {
@@ -370,8 +397,9 @@ def main():
     run(f"mkdir -p {REMOTE_ROOT}")
     _usb_monitor_remote = f"{REMOTE_ROOT}/usb_monitor.sh"
     _usb_monitor_digest_before = state.get(_usb_monitor_remote)
-    uploaded, skipped = upload_tree(sftp, local_scripts, REMOTE_ROOT, log, state, force=args.force)
+    uploaded, skipped, seen_remote_paths = upload_tree(sftp, local_scripts, REMOTE_ROOT, log, state, force=args.force)
     usb_monitor_changed = state.get(_usb_monitor_remote) != _usb_monitor_digest_before
+    prune_stale_scripts(sftp, state, seen_remote_paths, log)
     save_state(state)  # save after every phase, not just at the end - a
     # later phase failing shouldn't lose credit for scripts that already
     # made it over
