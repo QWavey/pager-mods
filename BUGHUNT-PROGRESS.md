@@ -24,6 +24,19 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
 5. reset.sh: 3 ip-link calls in the br-sniff teardown still used a
    hardcoded `timeout 5` instead of the shared ip_link() wrapper - silently
    ignored PAGER_IP_LINK_TIMEOUT while every other call site respected it.
+6. loot.sh, ssidpool.sh, autossh.sh, dnsspoof.sh: no -y/--yes flag defined
+   at all despite a CLI-reachable confirm() gate (--archive/clear/--clear
+   respectively) - could never be scripted/automated. reconsession.sh had
+   the mirror-image bug: an earlier fix this session added a confirm()
+   gate to --new that checks $ASSUME_YES, but no flag ever set it either -
+   my own regression, now fixed the same way. All fixed with a pre-scan
+   loop that also FILTERS -y/--yes out of "$@" (not just detects it), so it
+   can't land as a literal positional arg to add/delete/--setup/etc.
+7. EvilTwin.sh (x3), LanScan.sh (x1), tracer.sh (x2): raw, unbounded
+   `ip link show` calls with no timeout protection at all (worse than
+   reset.sh's old hardcoded-timeout bug - these had NO timeout), unlike
+   sniff.sh/reset.sh/common.sh which all route through the shared
+   ip_link() wrapper. Converted to ip_link() for consistency/safety.
 
 ## Reviewed, no new bugs found
 
@@ -32,10 +45,15 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
 - setup.py, sync.py (full re-read)
 - scripts/filters.sh (post-refactor re-check)
 - scripts/deauth.sh: scan_ssid_groups/ssid_group_pairs/all_ap_pairs/sql_escape
+- scripts/bluetooth.sh: run_disrupt() dwell/channel arithmetic
+- scripts/mgmt.sh (full re-read)
+- scripts/gps.sh, clientip.sh, screen.sh, dns.sh (dnsspoof.sh's -y gap
+  found separately, see above)
 - app.js ACTIONS table vs index.html: cross-checked every referenced
   element ID (inputs, outputs, buttons) - all present, no duplicates, no
   mismatches
 - payloads/general/pc_link_recon, custom_lan_scan (fresh re-read)
+- scripts/LanScan.sh (rest of file, beyond the ip_link fix above)
 
 ## Improvement-shaped ideas parked (not acted on here - see /quick-map output)
 

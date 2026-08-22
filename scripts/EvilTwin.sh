@@ -119,7 +119,12 @@ show_status() {
     iw dev 2>/dev/null | awk '/phy#/{p=$0} /Interface/{print p" "$0}'
     echo
     echo "-- Ethernet uplink (eth1) --"
-    if ip link show eth1 >/dev/null 2>&1; then
+    # BUG FOUND AND FIXED (found via code review - same class as reset.sh's
+    # earlier fix, but worse here: this wasn't even wrapped in `timeout` at
+    # all, unlike sniff.sh/reset.sh/common.sh which all use the shared
+    # ip_link() wrapper for every `ip link` call so a stuck/hanging `ip`
+    # can't block the caller indefinitely).
+    if ip_link show eth1 >/dev/null 2>&1; then
         ip -4 addr show eth1 2>/dev/null
     else
         echo "  eth1 not present (USB-C ethernet adapter not connected)"
@@ -259,7 +264,10 @@ setup_uplink() {
     local mode="$UPLINK_MODE"
 
     if [ "$mode" = "auto" ]; then
-        if ip link show eth1 >/dev/null 2>&1; then
+        # BUG FOUND AND FIXED (same class as show_status()'s fix above): use
+        # the shared timeout-protected ip_link() wrapper instead of a raw,
+        # unbounded `ip link show`.
+        if ip_link show eth1 >/dev/null 2>&1; then
             mode="eth"
         else
             mode="wifi"
@@ -274,7 +282,7 @@ setup_uplink() {
 
     case "$mode" in
         eth)
-            if ! ip link show eth1 >/dev/null 2>&1; then
+            if ! ip_link show eth1 >/dev/null 2>&1; then
                 die "Ethernet uplink requested but eth1 is not present. Plug in the USB-C ethernet adapter, or use --uplink wifi."
             fi
             say "Using Ethernet uplink (eth1) - radio0 is fully free for PineAP. This is the officially recommended, stable configuration."

@@ -149,7 +149,10 @@ case "$MODE" in
                 die "USB-A adapter ($IFACE) detected but link is down - check the cable. Or pass --iface eth0 explicitly to trace the management port instead."
             fi
         fi
-        ip link show "$IFACE" >/dev/null 2>&1 || die "Interface '$IFACE' does not exist."
+        # BUG FOUND AND FIXED (found via code review - same class as
+        # reset.sh's earlier fix): use the shared timeout-protected
+        # ip_link() wrapper instead of a raw, unbounded `ip link show`.
+        ip_link show "$IFACE" >/dev/null 2>&1 || die "Interface '$IFACE' does not exist."
         say "Tracing wired LAN traffic on $IFACE..."
         ;;
     monitor)
@@ -157,7 +160,8 @@ case "$MODE" in
             IFACE=$(monitor_iface)
             [ -z "$IFACE" ] && die "No monitor-mode interface found (expected wlan0mon or wlan1mon) - is the WiFi radio up?"
         fi
-        ip link show "$IFACE" >/dev/null 2>&1 || die "Interface '$IFACE' does not exist."
+        # BUG FOUND AND FIXED (same class as the wired branch above).
+        ip_link show "$IFACE" >/dev/null 2>&1 || die "Interface '$IFACE' does not exist."
         say "Passively watching nearby 802.11 traffic on $IFACE (no connection required)..."
         say "Note: this interface may be actively channel-hopped by recon, so the channel you're seeing shifts constantly - that's expected, not a bug."
         ;;

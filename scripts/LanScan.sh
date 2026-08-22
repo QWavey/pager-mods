@@ -68,7 +68,11 @@ if ! command -v nmap >/dev/null 2>&1; then
     die "nmap is not installed. Install it with: opkg update && opkg install -d mmc nmap"
 fi
 
-if ! ip link show "$IFACE" >/dev/null 2>&1; then
+# BUG FOUND AND FIXED (found via code review - same class as reset.sh's
+# earlier fix): use the shared timeout-protected ip_link() wrapper instead
+# of a raw, unbounded `ip link show` that has no protection at all against
+# a stuck/hanging `ip` command.
+if ! ip_link show "$IFACE" >/dev/null 2>&1; then
     die "Interface '$IFACE' does not exist. Plug in the USB-C ethernet adapter (with the other end connected to your router/switch) and try again."
 fi
 
