@@ -625,46 +625,18 @@ start_lan_watchdog() {
                     exit 0
                 fi
             fi
-            # BUG FOUND AND FIXED (live-diagnosed - CRITICAL, this is very
-            # likely THE root cause of "bridging took forever and never
-            # actually did it"): this used to check ONLY "is eth0 in
-            # br-lan right now" and re-attach it there unconditionally if
-            # not. But eth0 NOT being in br-lan is the INTENDED, PERMANENT
-            # state for the entire time a --bridge session is legitimately
-            # up (that's the whole point - eth0 moves into $BRIDGE_NAME
-            # instead). A network interface can only have ONE master at a
-            # time, so this watchdog was re-attaching eth0 to br-lan every
-            # ~5 seconds WHILE A BRIDGE WAS ACTIVELY RUNNING - yanking it
-            # straight back out of br-sniff each time, meaning the bridge
-            # could never actually stabilize: eth0 flip-flopped between
-            # the two bridges every 5s, forever, fighting its own intended
-            # purpose. Confirmed live: two stuck duplicate
-            # `sniff.sh --bridge eth0 eth1` processes found still running,
-            # with br-sniff existing but showing ZERO attached interfaces -
-            # exactly the signature of eth0 never getting to stay put.
-            #
-            # Fix: only restore eth0 to br-lan if the BRIDGE ITSELF has
-            # unexpectedly gone away (crashed, externally torn down,
-            # deleted outside of --unbridge) - NOT simply because eth0
-            # isn't in br-lan, which during a legitimate bridge session is
-            # completely normal. The watchdog's actual job (per its own
-            # header - "if something disconnects... reset LAN settings")
-            # is recovering from an UNEXPECTED failure, not fighting the
-            # very bridge it exists to protect while that bridge is
-            # working exactly as intended.
-            if ! ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
-                # READABILITY FIX (same one applied in reset.sh, same
-                # confirmation): /sys/class/net/<bridge>/brif/<port> is a
-                # symlink INTO the port's own sysfs device directory, and
-                # `cat` on a directory always fails - the `cat .../eth0`
-                # half of this check could never succeed, only the
-                # `ls .../brif/ | grep -qx eth0` half has ever actually
-                # done the detection.
-                if ! ls /sys/class/net/br-lan/brif/ 2>/dev/null | grep -qx eth0; then
-                    ip_link set eth0 master br-lan >/dev/null 2>&1
-                    ip_link set eth0 up >/dev/null 2>&1
-                fi
-            fi
+            # BIG CHANGE: this used to be this file's OWN independent copy
+            # of "is eth0 where it belongs, fix it if not" - the exact
+            # logic that caused a real, live-diagnosed incident (this
+            # watchdog fighting eth0 out of an ACTIVELY RUNNING bridge
+            # every 5s, because the old version checked only "is eth0 in
+            # br-lan" with no awareness that NOT being there is correct
+            # while a bridge session is up). That incident is exactly why
+            # this is now the shared, declarative canonicalize_lan_topology()
+            # in lib/common.sh instead of a second hand-maintained copy of
+            # the same safety-critical recovery logic reset.sh also needs -
+            # a fix to one could no longer silently miss the other.
+            canonicalize_lan_topology bridged "$BRIDGE_NAME"
         done
     ) &
     echo $! > "$WATCHDOG_PIDFILE"

@@ -337,38 +337,22 @@ reset_network() {
     # rather than just hoping the reload was enough - verified this is
     # the correct target state live (see comment above).
     #
-    # MEASURED AND CHANGED: checking immediately after the reload call
-    # returns caught eth0 "not yet in br-lan" almost every time in live
-    # testing - not a real failure, just the reload finishing async and
-    # not having fully re-attached the interface in the brief instant
-    # before this check ran. A short retry (up to 3 tries, 1s apart)
-    # before concluding the fallback is genuinely needed cuts that false
-    # alarm down without weakening the real safety net - it still fires
-    # for a genuine failure, just doesn't cry wolf on ordinary timing.
-    # READABILITY FIX (found via code review, confirmed with a standalone
-    # reproduction): the `cat .../brif/eth0` half of this check can never
-    # succeed - /sys/class/net/<bridge>/brif/<port> is a symlink INTO the
-    # port's own sysfs device directory, and `cat` on a directory always
-    # fails (confirmed: exit 1, "Is a directory"). The `ls .../brif/ |
-    # grep -qx eth0` half is the only part that has ever actually done
-    # the detection - kept alone so this doesn't read as two real
-    # strategies when there's only one working one.
-    local tries=0 ok=0
-    while [ "$tries" -lt 3 ]; do
-        if ls /sys/class/net/br-lan/brif/ 2>/dev/null | grep -qx eth0; then
-            ok=1
-            break
-        fi
-        tries=$((tries + 1))
-        [ "$tries" -lt 3 ] && sleep 1
-    done
-    if [ "$ok" != "1" ]; then
-        err "eth0 still isn't in br-lan after the reload - re-attaching it directly."
-        # BUG FOUND AND FIXED: same missing-timeout class as above - this
-        # is the LAST-resort direct re-attach, the final safety net in the
-        # whole chain; it must never be able to hang itself.
-        timeout 5 ip link set eth0 master br-lan >/dev/null 2>&1
-        timeout 5 ip link set eth0 up >/dev/null 2>&1
+    # BIG CHANGE: this used to be this file's OWN hand-written retry-loop
+    # copy of "is eth0 in br-lan, fix it if not" - measured and tuned
+    # independently from sniff.sh's watchdog, which needed the exact same
+    # recovery logic for a related but distinct reason (see that file's own
+    # incident history). Two copies of the same safety-critical repair is
+    # exactly how a fix lands in one and gets silently missed in the other -
+    # now both call the one shared, declarative canonicalize_lan_topology()
+    # in lib/common.sh. "management" here means unconditional check/repair
+    # (this call site never has a legitimate reason for eth0 to be missing
+    # from br-lan, unlike sniff.sh's bridged case) - same retry timing this
+    # file already measured and tuned live, now shared instead of
+    # duplicated.
+    if canonicalize_lan_topology management; then
+        say "eth0/br-lan confirmed correct."
+    else
+        err "eth0 still isn't in br-lan after the reload and a direct re-attach attempt - this needs a manual check (\`ip link show eth0\`, \`brctl show br-lan\`)."
     fi
     say "Done - eth0/br-lan should be back to normal. If you're reading this, SSH survived the reload; if a session that ran this one dropped instead, that's expected (the network briefly re-initializes) - just reconnect."
 }

@@ -114,6 +114,125 @@ ip_link() { timeout "$IP_LINK_TIMEOUT" ip link "$@"; }
 # place.
 pid_running() { [ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null; }
 
+# ===========================================================================
+# BIG CHANGE: declarative LAN-topology reconciler.
+#
+# Until now, "is eth0 actually where it belongs, and if not, put it back"
+# existed as TWO independently hand-written implementations that quietly
+# drifted apart in both logic and correctness:
+#   - sniff.sh's --bridge watchdog: checks once per 5s tick, but ONLY acts
+#     when br-sniff itself has vanished (it must never fight eth0 out of a
+#     bridge that's legitimately active - a real, live-diagnosed incident
+#     this exact file's own history documents: the watchdog used to yank
+#     eth0 back into br-lan every 5s WHILE A BRIDGE WAS ACTIVELY RUNNING,
+#     because it only ever checked "is eth0 in br-lan" with no awareness of
+#     whether that was actually supposed to be true right now).
+#   - reset.sh's reset_network(): a 3-try/1s-sleep retry loop with no such
+#     awareness, called once after a network reload as the last-resort
+#     safety net.
+# Two copies of the same safety-critical recovery logic is exactly the
+# condition that let the watchdog bug above survive - a fix applied to one
+# copy doesn't reach the other. This collapses both into ONE declarative
+# reconciler: tell it what state the topology SHOULD be in right now
+# (management vs. a bridge session), and it inspects ONLY live kernel state
+# (never a remembered intent, a config flag, or a PID file) and repairs any
+# drift from that. sniff.sh's watchdog and reset.sh's reset_network() both
+# call this now instead of maintaining their own copy of the recovery
+# logic - this IS the "topology-as-truth" mechanism from this session's own
+# earlier /invent round, actually built instead of just proposed.
+#
+# topology_log MESSAGE - an append-only, immediately-flushed transition
+# log surviving a SIGKILL of whatever process called it (each line is a
+# separate `echo >>`, not buffered), so a "why did the bridge/reset hang or
+# do something unexpected" question can be answered AFTER THE FACT from
+# forensic evidence instead of nothing at all - directly answering this
+# session's own recurring complaint ("it just said Starting Lan Sniffer,
+# I have no idea why"). Bounded (see prune below) so it can't grow forever
+# across a long-lived device's whole uptime.
+TOPOLOGY_LOG="/tmp/pager-topology.log"
+topology_log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '?'): $*" >>"$TOPOLOGY_LOG" 2>/dev/null
+    # Cheap unbounded-growth guard: only actually check/trim every ~32nd
+    # call (a plain `wc -l` on every single call would be wasteful for a
+    # log written every 5s by an hours-long watchdog) - once it's grown
+    # past 2000 lines, keep only the most recent 1000.
+    if [ "$(( ${RANDOM:-0} % 32 ))" -eq 0 ]; then
+        local n
+        n=$(wc -l <"$TOPOLOGY_LOG" 2>/dev/null || echo 0)
+        if [ "$n" -gt 2000 ] 2>/dev/null; then
+            tail -n 1000 "$TOPOLOGY_LOG" >"${TOPOLOGY_LOG}.tmp" 2>/dev/null && mv "${TOPOLOGY_LOG}.tmp" "$TOPOLOGY_LOG" 2>/dev/null
+        fi
+    fi
+}
+
+# eth0_in_br_lan - the actual detection primitive both reconciliation paths
+# below rely on. /sys/class/net/<bridge>/brif/<port> is a symlink INTO the
+# port's own sysfs device directory - `ls` on the brif/ directory is the
+# only half of the old "cat vs ls" check either file ever used that could
+# actually succeed (a `cat` on that symlink target is a directory read,
+# which always fails - confirmed and already fixed independently in both
+# sniff.sh and reset.sh before this consolidation; kept as the one, correct
+# implementation here instead of an artifact carried into two files).
+eth0_in_br_lan() { ls /sys/class/net/br-lan/brif/ 2>/dev/null | grep -qx eth0; }
+
+# canonicalize_lan_topology DESIRED [BRIDGE_NAME] - the reconciler itself.
+#   DESIRED=management  eth0 belongs in br-lan, unconditionally check/repair
+#                          (reset.sh's own case: this IS the safety net).
+#   DESIRED=bridged        a BRIDGE_NAME-style session should currently be
+#                            up - only self-heals if the bridge ITSELF has
+#                            vanished; eth0 legitimately NOT being in br-lan
+#                            while a real bridge is active is not something
+#                            to fight (see the incident this whole
+#                            consolidation is named after, above).
+# Returns 0 once eth0 is confirmed correctly placed for the given DESIRED
+# state (including "correctly not touched" for an actively-bridged
+# session), 1 if repair was attempted and still didn't take.
+canonicalize_lan_topology() {
+    local desired="$1" bridge="${2:-br-sniff}"
+
+    case "$desired" in
+        bridged)
+            if ip_link show "$bridge" >/dev/null 2>&1; then
+                return 0  # bridge present - presumably holding eth0, not this reconciler's job to touch it
+            fi
+            topology_log "reconciler: desired=bridged but '$bridge' is gone - falling through to management repair"
+            ;;
+        management) : ;;
+        *) topology_log "reconciler: unknown desired state '$desired' - refusing to guess"; return 1 ;;
+    esac
+
+    if eth0_in_br_lan; then
+        return 0
+    fi
+
+    # A short retry before concluding repair is genuinely needed - measured
+    # live this session that checking immediately after a network reload
+    # call returns can catch eth0 "not yet re-attached" almost every time,
+    # not because anything's actually wrong, just because the reload
+    # finishes asynchronously. Real for the bridged->management fallback
+    # path too (a bridge that just came down needs a moment the same way).
+    local tries=0
+    while [ "$tries" -lt 3 ] && ! eth0_in_br_lan; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 3 ] && sleep 1
+    done
+    if eth0_in_br_lan; then
+        return 0
+    fi
+
+    topology_log "reconciler: eth0 not in br-lan for desired=$desired - re-attaching directly"
+    ip_link set eth0 master br-lan >/dev/null 2>&1
+    ip_link set eth0 up >/dev/null 2>&1
+    if eth0_in_br_lan; then
+        topology_log "reconciler: eth0 re-attach succeeded"
+        return 0
+    else
+        topology_log "reconciler: eth0 re-attach FAILED - still not in br-lan"
+        return 1
+    fi
+}
+# ===========================================================================
+
 # is_valid_mac MAC - does this look like a real xx:xx:xx:xx:xx:xx MAC
 # address? Catches typos early with a clear error instead of a command
 # silently doing nothing (or a sqlite3 query silently matching zero rows)
