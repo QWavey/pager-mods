@@ -26,3 +26,19 @@ For 6. Send a message to agent a9e687878de3790f0 redirecting its scope from scri
 For 7. No action - explicitly do not send any message to aab6d7ece7be358a4 as part of this task list. Done when: confirmed by the absence of any SendMessage call to it during this task run.
 
 For 8. Only launch new /improve 30 + /bug-hunt 10 agents for sniff.sh if the redirected agent from task 6 is scoped narrowly enough (e.g. bug-hunt only) that it doesn't already cover an improve-style pass too - otherwise treat task 6's redirect as satisfying this ask, to avoid duplicate/conflicting agents on the same file. Done when: either new agents are launched with a clear non-overlapping scope, or a clear reasoned decision is recorded that the redirect already covers it.
+
+---
+
+# Parked improvement ideas (found during a pure bug-hunt pass, NOT implemented - recorded per user instruction to use quick-map instead of fixing improvement-shaped findings mid-hunt)
+
+9. [ ] Add numeric validation to connect.sh's --timeout
+10. [ ] Add numeric validation to clientip.sh's --timeout
+11. [ ] Add numeric validation to PayloadRunner.sh's --timeout
+
+---
+
+For 9. connect.sh's --timeout is handed straight to WIFI_WAIT with no numeric check, unlike --duration/--channel elsewhere in the toolkit. Not a confirmed silent-failure bug (a garbage value already surfaces via the existing "Did not associate within Xs" die() path), just imprecise root-causing - add `case "$TIMEOUT" in *[!0-9]*) die "'--timeout' needs a whole number of seconds (got '$TIMEOUT')." ;; esac` right after arg parsing, matching the pattern already used elsewhere (e.g. sniff.sh's --duration/--count, deauth.sh's --channel). Done when: a non-numeric --timeout gives that specific message instead of the generic "did not associate" one.
+
+For 10. Same idea for clientip.sh's --timeout (used in FIND_CLIENT_IP "$MAC" "$TIMEOUT") - already has a working fallback ("No IP found for $MAC...") but not a precise one. Same fix pattern as task 9. Done when: same criterion.
+
+For 11. Same idea for PayloadRunner.sh's --timeout (used in `timeout "$TIMEOUT" "${cmd[@]}"`) - the existing liveness-check error message already mentions "a bad --timeout value" as a possible cause, so this is the lowest-priority of the three, but an explicit check would make that the CONFIRMED reason instead of a guess. Same fix pattern. Done when: same criterion.
