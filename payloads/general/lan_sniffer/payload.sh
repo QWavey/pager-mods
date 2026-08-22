@@ -2,7 +2,7 @@
 # Title: LAN Sniffer
 # Author: florian
 # Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - full internet access stays intact) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
-# Version: 3.1
+# Version: 3.2
 #
 # This is a general-payload wrapper around sniff.sh's own capture pipeline
 # (nothing new re-implemented here). There was no dedicated Payloads-menu
@@ -260,6 +260,27 @@ case "$__mode" in
             LOG "User cancelled."
             exit 0
         fi
+        # BUG FOUND AND FIXED (reported live - "it just stayed here" showing
+        # nothing but the platform's own default launch splash, for the
+        # whole window between confirming and the bridge coming up): no
+        # LOG/ALERT call fired anywhere between the LIST_PICKER/
+        # CONFIRMATION_DIALOG above and the bridge call below - the on-
+        # screen log had genuinely nothing new to show for that entire
+        # stretch. Live-diagnosed via dmesg (uptime-correlated against the
+        # screenshot's own on-screen clock): the bridge itself actually DID
+        # come up successfully, in well under 10s (both ports reached
+        # "forwarding state") - the apparent hang is consistent with this
+        # session's OWN separately-confirmed finding that PINEAPPLE_EXAMINE_
+        # RESET can transiently stall for several seconds right around a
+        # network-topology change (bridging eth0 is exactly that) - the
+        # LOG/ALERT calls immediately AFTER the bridge call are just as
+        # exposed to that same local-daemon contention window as any other
+        # platform command is. This can't be eliminated from here (it's the
+        # platform's own IPC being busy, not this script's own logic), but
+        # showing real progress BEFORE the risky call at least means the
+        # user sees something change before that stall window starts,
+        # instead of the same static launch splash from the very beginning.
+        LOG "Confirmed - bridging $__a and eth0 now. This briefly touches the network stack, so the screen may pause for a few seconds before the next update - that's expected, not a hang."
         # BUG FOUND AND FIXED: this call's success/failure was never
         # checked - if bridging failed for any reason (ip link add/set
         # erroring, a rare race after the adapter checks above), the
