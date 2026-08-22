@@ -100,6 +100,69 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
   `python -m py_compile` on all three .py files: 100% clean, nothing
   accidentally broken by this session's edits.
 
+## Live incident investigation (device report: stuck LAN bridge, reset errors, USB notification)
+
+Investigated via live SSH: dmesg (uptime-correlated against the reported
+screenshot's own on-screen clock), the actual /tmp/pager-reset.log,
+usb_monitor.sh's log, and repeated live re-tests of the specific commands
+that errored.
+
+15. reset.sh: `btmgmt clr-adv` (used in reset_bluetooth()) is NOT safe to
+    call unconditionally - confirmed live it returns a real nonzero exit
+    ("Invalid Parameters") whenever zero advertising instances are
+    currently registered, which is the NORMAL case on almost every reset
+    run. This made reset.sh report a false "Bluetooth radio may still be
+    in a bad state" on nearly every normal run. Fixed: check the real
+    instance count (btmgmt advinfo) first, only call/check clr-adv when
+    there's actually something to clear. Live-verified: a full `reset.sh
+    --all` now reports "Done." for Bluetooth instead of a false error.
+16. reset.sh: reordered --all/no-flags to run network recovery FIRST
+    instead of last (was: processes/wifi/bluetooth/network). Motivated by
+    the live incident where WiFi/Bluetooth reset commands ran while the
+    network was still disrupted from a prior LAN-bridge attempt.
+17. reset.sh: PINEAPPLE_EXAMINE_RESET still timed out once even AFTER the
+    reorder (network confirmed fine beforehand, ruling out network
+    contention specifically) - re-diagnosed via 4 immediate repeat calls
+    (all ~0.2s) plus /proc/loadavg showing a real, decaying load spike.
+    This is genuine occasional contention on modest embedded hardware, not
+    a code bug - widened the timeout 10s->15s and added one retry after a
+    short pause (matching the same "transient vs genuinely wedged"
+    distinction already used elsewhere in this file). Live-verified: a
+    subsequent full `reset.sh --all` completed 100% clean, all four steps
+    reporting "Done."
+18. lan_sniffer payload: the reported "stuck at Starting LAN Sniffer"
+    screenshot was live-diagnosed (not guessed) via dmesg timestamps
+    correlated against the screenshot's own on-screen clock (uptime math:
+    7433.45s uptime at 15:09:47 wall-clock => the dmesg bridge-up event at
+    ~7080-7081s falls almost exactly at the screenshot's visible "03:04
+    PM"). The bridge itself DID come up successfully in under 10s (both
+    ports reached kernel "forwarding state") - the apparent hang is the
+    on-screen LOG/ALERT calls immediately after the bridge call stalling,
+    consistent with this session's own separately-confirmed finding
+    (EvilTwin.sh's PINEAPPLE_MIMIC_DISABLE, reset.sh's PINEAPPLE_EXAMINE_
+    RESET above) that local platform IPC can transiently stall around a
+    network-topology change. Can't be eliminated from the payload itself
+    (it's the platform's own IPC being busy) - added a LOG call BEFORE the
+    risky bridge call instead, so real progress shows before that stall
+    window starts rather than the screen looking frozen from the very
+    beginning.
+19. usb_monitor.sh / USB on-screen notification: re-confirmed detection
+    itself genuinely works (live log evidence: real attach/detach events
+    with correct bus IDs and vendor identification - "ASIX (ASIX
+    AX88179B)" - captured accurately). Re-confirmed via enumerating EVERY
+    hak5cmd symlink on the device (ALERT, LOG, PROMPT, CONFIRMATION_DIALOG,
+    ERROR_DIALOG, pickers, spinners - the complete list) that no
+    toast/auto-dismissing notification primitive exists on this firmware
+    at all - this is a genuine, already-previously-diagnosed platform API
+    ceiling (ALERT pops up but never auto-dismisses per Hak5's own docs;
+    LOG doesn't pop up, only appends to a dedicated log view), not a new
+    code bug. Asked the user to clarify what "doesn't work" means
+    specifically before changing anything further, since the LOG-over-
+    ALERT choice was already made deliberately based on earlier explicit
+    user feedback ("the messages still don't go away after a while") and
+    reverting it without confirmation risks re-introducing that exact
+    complaint.
+
 ## User-directed follow-up work (post full-coverage checkpoint)
 
 The user asked for two specific things after the checkpoint below: (1)
