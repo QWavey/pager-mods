@@ -236,17 +236,32 @@ reset_wifi() {
     # to respond promptly would hang this step, and everything after it,
     # indefinitely). Bounded the same way for the same reason.
     #
-    # LIVE-VERIFIED: PINEAPPLE_EXAMINE_RESET itself measured consistently
-    # fast (0.5s, 0.8s across two live calls) - no sign of the transient
-    # slowness found in EvilTwin.sh's PINEAPPLE_MIMIC_DISABLE. 10s stays,
-    # already a comfortable margin above observed reality.
+    # RE-DIAGNOSED (live device report, superseding the note this comment
+    # used to have): the earlier "consistently fast, 10s is a comfortable
+    # margin" claim was based on only two calls in isolation - a real
+    # reset.sh --all run since then hit an actual timeout here (confirmed
+    # via the device's own reset log), even AFTER reordering this file so
+    # --network runs first (so it wasn't simply "network mid-reconfigure"
+    # contention - ruled that out by testing immediately afterward: 4
+    # repeated calls right after the failure all came back in ~0.2s, and
+    # /proc/loadavg showed a real, if decaying, load spike at the time).
+    # This device is modest embedded hardware (251MB RAM) running several
+    # other things (pineapd/recon, hostapd, dnsmasq, this exact reset run's
+    # own other steps) - genuine transient contention here is real, not
+    # hypothetical, so a single try with no retry margin was too brittle.
+    # Widened 10s -> 15s and added one retry after a short pause (same
+    # "transient stall vs genuinely wedged" distinction reset.sh's own
+    # br-sniff teardown and sniff.sh's --unbridge already make with a
+    # retry loop) before reporting real failure.
     # BIG CHANGE: this printed "Done." unconditionally regardless of
     # PINEAPPLE_EXAMINE_RESET's real exit code - see reset_processes()'s
     # comment above for why this whole file gets the same treatment now.
-    if timeout 10 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; then
+    if timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; then
         say "Done."
+    elif { sleep 1; timeout 15 PINEAPPLE_EXAMINE_RESET >/dev/null 2>&1; }; then
+        say "Done (needed a retry - the first attempt hit transient contention)."
     else
-        err "PINEAPPLE_EXAMINE_RESET failed or timed out - the WiFi channel lock may not actually have been cleared."
+        err "PINEAPPLE_EXAMINE_RESET failed or timed out twice - the WiFi channel lock may not actually have been cleared."
     fi
 }
 
