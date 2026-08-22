@@ -30,12 +30,19 @@ payloads/, then the two installer scripts.
 1. [x] scripts/lib/common.sh
 2. [x] scripts/lib/raw_deauth.py
 3. [x] scripts/EvilTwin.sh
-4. [ ] scripts/LanScan.sh
-5. [ ] scripts/PayloadRunner.sh
-6. [ ] scripts/alert.sh
-7. [ ] scripts/autossh.sh
-8. [ ] scripts/bands.sh
-9. [ ] scripts/battery.sh
+4. [x] scripts/LanScan.sh
+5. [x] scripts/PayloadRunner.sh
+6. [x] scripts/alert.sh (verdict: left as-is - already fully hardened; the
+   obvious generic pattern, "wrap every platform call in a timeout," was
+   considered and explicitly rejected here since PROMPT/CONFIRMATION_DIALOG/
+   ALERT/ERROR_DIALOG are all confirmed to block until a human dismisses
+   them on the physical screen - that's their whole job, not a hang to
+   guard against; timing one out would abandon a dialog on the physical
+   screen while the shell process moved on, a regression, not a fix)
+7. [x] scripts/autossh.sh
+8. [x] scripts/bands.sh (verdict: left as-is - thin single-command wrapper,
+   already handles its one real edge case; no genuine big-change candidate)
+9. [x] scripts/battery.sh
 10. [ ] scripts/bluetooth.sh
 11. [ ] scripts/clientip.sh
 12. [ ] scripts/config.sh

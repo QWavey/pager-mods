@@ -15,6 +15,7 @@
 #   autossh.sh --setup HOST PORT USER REMOTEPORT LOCALPORT
 #   autossh.sh --add-port local|remote LOCALPORT HOST REMOTEPORT
 #   autossh.sh --known-host HOSTNAME KEYTYPE KEYDATA
+#   autossh.sh --status        best-effort: is a tunnel actually up right now
 #   autossh.sh                interactive mode
 
 set -u
@@ -33,7 +34,33 @@ usage() { print_help "$0"; exit 1; }
 # believing they have a working remote-access tunnel configured when they
 # don't, and the gap wouldn't surface until the moment they actually
 # needed that access and it wasn't there.
+# BIG CHANGE: this whole script could only ever tell you whether the
+# ENABLE/CONFIGURE/ADD_PORT commands themselves returned success - never
+# whether a tunnel to the configured host is actually, currently up. For a
+# script whose entire purpose is a phone-home access-of-last-resort, that's
+# the one question that actually matters and the one this couldn't answer -
+# "configured successfully" and "actually connected right now" are very
+# different things (wrong credentials, an unreachable host, a firewall
+# change on the far end all leave the config looking fine while the tunnel
+# itself is silently dead). Best-effort only, clearly labeled as such: this
+# process-name check has NOT been confirmed live against this exact
+# firmware's AutoSSH implementation (the device wasn't reachable while this
+# was written) - if it doesn't detect a real tunnel, verify by hand with
+# `ps w | grep ssh` rather than trusting a false negative here.
+do_status() {
+    say "AutoSSH tunnel status (best-effort - see comment above for the caveat):"
+    local hits
+    hits=$(ps w 2>/dev/null | grep -iE 'autossh|ssh[^|]*-[RL] ' | grep -v grep)
+    if [ -n "$hits" ]; then
+        say "Tunnel process(es) found - looks like it's up:"
+        echo "$hits"
+    else
+        say "No matching tunnel process found. This could mean AutoSSH is genuinely disabled/disconnected, OR that this best-effort process match just doesn't recognize this firmware's process name - check manually with 'ps w | grep ssh' before assuming the tunnel is really down."
+    fi
+}
+
 case "${1:-}" in
+    --status) do_status ;;
     --enable) AUTOSSH_ENABLE && say "AutoSSH enabled." || die "Failed to enable AutoSSH." ;;
     --disable) AUTOSSH_DISABLE && say "AutoSSH disabled." || die "Failed to disable AutoSSH." ;;
     --clear) confirm "Clear AutoSSH configuration?" && { AUTOSSH_CLEAR && say "Cleared." || die "Failed to clear AutoSSH configuration."; } ;;
@@ -57,12 +84,13 @@ case "${1:-}" in
     -h|--help) usage ;;
     "")
         echo "== autossh.sh =="
-        echo "1) Enable  2) Disable  3) Clear config  4) Full setup (host/port/user/ports)"
+        echo "1) Enable  2) Disable  3) Clear config  4) Full setup (host/port/user/ports)  5) Status"
         c=$(ask "Choose" "1")
         case "$c" in
             1) AUTOSSH_ENABLE && say "AutoSSH enabled." || err "Failed to enable AutoSSH." ;;
             2) AUTOSSH_DISABLE && say "AutoSSH disabled." || err "Failed to disable AutoSSH." ;;
             3) confirm "Clear AutoSSH configuration?" && { AUTOSSH_CLEAR && say "Cleared." || err "Failed to clear AutoSSH configuration."; } ;;
+            5) do_status ;;
             4)
                 h=$(ask "Remote host" ""); p=$(ask "Remote SSH port" "22")
                 u=$(ask "Remote username" ""); rp=$(ask "Remote port (on the far end)" "2222")
