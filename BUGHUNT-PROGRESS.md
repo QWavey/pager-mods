@@ -100,6 +100,57 @@ duration prompt"). Backup + full git history from earlier sessions still intact.
   `python -m py_compile` on all three .py files: 100% clean, nothing
   accidentally broken by this session's edits.
 
+## User-directed follow-up work (post full-coverage checkpoint)
+
+The user asked for two specific things after the checkpoint below: (1)
+implement the parked pid_running() PID-reuse hardening (Tasks.md item 12),
+and (2) bring deadnet.sh/deadnet_lan_kill back into scope for improvement
+(previously explicitly excluded), keeping a backup first.
+
+12. EvilTwin.sh: WiFi-uplink connect hardcoded "psk2" - same fragility
+    connect.sh's own header already documents fixing for the general case
+    ("tries psk2, sae-mixed, sae, psk in order"). A WPA3 uplink network
+    would just fail outright here. Now retries the same 4 encryption
+    types in the same order.
+13. pid_running() (lib/common.sh): now takes an optional NAME_PATTERN and
+    verifies /proc/$PID/cmdline actually contains it before treating a PID
+    as a live match - closes the PID-reuse false-positive gap parked
+    earlier. Fails open (identical to the old bare kill -0) whenever no
+    pattern is given or /proc/$PID/cmdline can't be read, so it can only
+    ever narrow a false "running", never introduce a new false negative.
+    All 9 call sites updated (bluetooth.sh/crash_logger.sh/deauth.sh x2/
+    sniff.sh/tracer.sh/usb_monitor.sh pass their own script name;
+    PayloadRunner.sh passes "payload.sh"; webui.sh passes "server.py"
+    since its background launch execs into python3, replacing its cmdline).
+    Live-verified on the device: usb_monitor.sh --status still correctly
+    reports Running against its real PID/cmdline.
+14. deadnet.sh (brought back into scope per user request, backup kept at
+    backups/Deadnet_lan_old.sh + backups/deadnet_lan_kill_payload_old.sh):
+    - Real --background support - the file's own header comment claimed
+      this already existed ("If started in the background... use
+      deadnet.sh --stop") but no --background flag existed anywhere in
+      the argument parser at all. The deadnet_lan_kill payload worked
+      around this with a bare `&`, no PIDFILE, no liveness check.
+    - is_running() rewritten from a fragile `ps | grep 'deadnet\.py'` name
+      scan (the exact self-identification fragility deauth.sh's own
+      history already moved away from) to the shared PIDFILE + hardened
+      pid_running() pattern every other backgroundable script uses.
+    - No single-instance protection existed at all - could launch two
+      concurrent ARP-poisoning processes fighting over the same interface.
+    - lan_available() used a raw, unbounded `ip link show` instead of the
+      shared ip_link() wrapper (same class fixed in EvilTwin.sh/LanScan.sh/
+      tracer.sh earlier this session).
+    - --gateway-mac had no MAC format validation; --sleep/--cidr had no
+      numeric validation at all (same classes fixed throughout the rest of
+      the toolkit this session).
+    - deadnet_lan_kill payload updated to use the new --background flag
+      properly (with a liveness check) instead of its own external `&`
+      workaround.
+    - Live-verified on the device: syntax, --status, and all three new
+      validation checks (bad --gateway-mac, bad --sleep, out-of-range
+      --cidr) all behave correctly. Did NOT live-test the actual
+      ARP-poisoning attack itself (would disrupt the real LAN).
+
 ## Full-toolkit coverage checkpoint (this run)
 
 Every file has now been read at least once this run (many multiple times,
