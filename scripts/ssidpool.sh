@@ -24,11 +24,18 @@ usage() { print_help "$0"; exit 1; }
 # --on/--off/--collect printed a success message unconditionally
 # regardless of the underlying PINEAPPLE_SSID_POOL_* command's real exit
 # code.
+# BIG CHANGE (found via code review while looking at this file): despite
+# this file's own header comment claiming the "unconditional success"
+# class was already fixed throughout, these three CLI-flag-less cases
+# (add/delete/clear) were actually MISSED - the exact same gap the comment
+# claims doesn't exist here anymore, still present in the three actions
+# that don't start with "--". Brought in line with --on/--off/--collect
+# and the interactive block's own choices 2-4, which all already check.
 case "${1:-}" in
-    add) shift; [ $# -eq 0 ] && die "add needs at least one SSID"; PINEAPPLE_SSID_POOL_ADD "$@" ;;
-    delete) shift; [ $# -eq 0 ] && die "delete needs at least one SSID"; PINEAPPLE_SSID_POOL_DELETE "$@" ;;
+    add) shift; [ $# -eq 0 ] && die "add needs at least one SSID"; PINEAPPLE_SSID_POOL_ADD "$@" && say "Added." || die "Failed to add: $*" ;;
+    delete) shift; [ $# -eq 0 ] && die "delete needs at least one SSID"; PINEAPPLE_SSID_POOL_DELETE "$@" && say "Deleted." || die "Failed to delete: $*" ;;
     list) PINEAPPLE_SSID_POOL_LIST ;;
-    clear) confirm "Clear the entire SSID pool?" && PINEAPPLE_SSID_POOL_CLEAR ;;
+    clear) if confirm "Clear the entire SSID pool?"; then PINEAPPLE_SSID_POOL_CLEAR && say "Cleared." || die "Failed to clear the pool."; else die "Aborted."; fi ;;
     --on)
         { if [ "${2:-}" = "random" ]; then PINEAPPLE_SSID_POOL_START random; else PINEAPPLE_SSID_POOL_START; fi; } \
             && say "Advertising started." || die "Failed to start advertising."

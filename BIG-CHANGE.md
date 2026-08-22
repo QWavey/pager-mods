@@ -112,10 +112,18 @@ payloads/, then the two installer scripts.
 36. [x] scripts/reset.sh - reset_wifi()/reset_bluetooth()/reset_processes()
     now report honestly instead of unconditional "Done." (this was the
     bug-hunt finding flagged earlier this session, now actually applied)
-37. [ ] scripts/ringtone.sh
-38. [ ] scripts/screen.sh
-39. [ ] scripts/sniff.sh
-40. [ ] scripts/ssidpool.sh
+37. [x] scripts/ringtone.sh - added --list (ls /root/ringtones/), shown
+    directly in interactive mode too
+38. [x] scripts/screen.sh (verdict: left as-is - trivial, already fully
+    hardened on both CLI and interactive paths)
+39. [x] scripts/sniff.sh - adopted shared ip_link()/pid_running() from
+    common.sh (removed a local duplicate ip_link() that was shadowing the
+    canonical one); otherwise deliberately conservative, same incident-
+    history reasoning as deauth.sh
+40. [x] scripts/ssidpool.sh - fixed a real gap: add/delete/clear (the
+    flag-less CLI actions) had NO success/failure reporting at all, despite
+    this file's own header comment claiming that class was already fixed
+    everywhere in it
 41. [ ] scripts/tracer.sh
 42. [ ] scripts/usb_monitor.sh
 43. [ ] scripts/vpn.sh

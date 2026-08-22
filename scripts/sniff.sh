@@ -89,7 +89,13 @@ BR_IFACE1=""; BR_IFACE2=""
 # reported. A bounded timeout guarantees every netlink operation this
 # script performs either finishes or fails cleanly within a few seconds,
 # so a hang here can never become an indefinite one.
-ip_link() { timeout 5 ip link "$@"; }
+#
+# BIG CHANGE (adopting common.sh's shared primitive): this used to be its
+# own local definition (`timeout 5 ip link "$@"`, no override) shadowing
+# the identical one lib/common.sh now provides for every script - same
+# behavior (still 5s by default), just one canonical implementation
+# instead of two, and now also honors PAGER_IP_LINK_TIMEOUT like every
+# other caller of the shared version.
 
 list_wired_ifaces() {
     # busybox `ip` on this device doesn't support `-br` at all (just dumps
@@ -475,7 +481,10 @@ if [ "$DO_ADAPTERS" = "1" ]; then
     exit 0
 fi
 
-is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+# BIG CHANGE (adopting common.sh's shared primitive): backed by the one
+# canonical pid_running() in lib/common.sh instead of another independent
+# copy of the same "PIDFILE + kill -0" check.
+is_running() { pid_running "$PIDFILE"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
