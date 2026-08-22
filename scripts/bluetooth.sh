@@ -183,7 +183,11 @@ STOPPING=0
 _bt_on_stop() { STOPPING=1; }
 trap _bt_on_stop INT TERM
 
-is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+# BIG CHANGE (adopting common.sh's shared primitive, added earlier in this
+# sweep): this exact "PIDFILE + kill -0" check was duplicated byte-for-byte
+# here and in deauth.sh/sniff.sh - now backed by the one canonical
+# pid_running() in lib/common.sh instead of a third independent copy.
+is_running() { pid_running "$PIDFILE"; }
 
 # advspam_instance_count - how many BLE advertising instances btmgmt
 # currently has registered. advspam doesn't run as a background process

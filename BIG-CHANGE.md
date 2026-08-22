@@ -43,11 +43,19 @@ payloads/, then the two installer scripts.
 8. [x] scripts/bands.sh (verdict: left as-is - thin single-command wrapper,
    already handles its one real edge case; no genuine big-change candidate)
 9. [x] scripts/battery.sh
-10. [ ] scripts/bluetooth.sh
-11. [ ] scripts/clientip.sh
-12. [ ] scripts/config.sh
-13. [ ] scripts/connect.sh
-14. [ ] scripts/crash_logger.sh
+10. [x] scripts/bluetooth.sh (adopted shared pid_running(); otherwise left
+    as-is - this file is unusually thorough already, live-diagnosed timing
+    fixes throughout; a forced rewrite here risks reintroducing exactly the
+    hard-won hang/cleanup bugs its own comments document)
+11. [x] scripts/clientip.sh (verdict: left as-is - 46-line thin wrapper,
+    already handles its one edge case, no genuine big-change candidate)
+12. [x] scripts/config.sh
+13. [x] scripts/connect.sh (verdict: left as-is - already solid; the one real
+    idea, shortening the psk2/sae-mixed/sae/psk retry loop's per-attempt
+    timeout, would need live measurement of how a wrong-encryption-type
+    failure actually behaves on this hardware, which isn't available right
+    now - recorded rather than guessed)
+14. [x] scripts/crash_logger.sh (adopted shared pid_running())
 15. [ ] scripts/deauth.sh
 16. [ ] scripts/dns.sh
 17. [ ] scripts/dnsspoof.sh

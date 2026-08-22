@@ -262,11 +262,24 @@ if [ -n "$SYS_HOSTNAME" ]; then
     say "About to change the system hostname to '$SYS_HOSTNAME'."
     say "This is a GENERIC OpenWRT setting (uci system), not an official Hak5/Pineapple command."
     if confirm "Proceed?"; then
-        uci set system.@system[0].hostname="$SYS_HOSTNAME"
-        uci commit system
-        /etc/init.d/system reload >/dev/null 2>&1
-        say "Hostname set to $SYS_HOSTNAME"
-        CHANGED=1
+        # BIG CHANGE: this whole block used to run uci set/commit and
+        # /etc/init.d/system reload with no error checking and no timeout at
+        # all, then print "Hostname set" unconditionally - the same two
+        # classes of bug (untimed subsystem-reload call, unconditional
+        # success message) this session's own incident history found and
+        # fixed for reset.sh's network reload and mgmt.sh/openap.sh's
+        # cfg_set-on-failure. /etc/init.d/system reload is the exact same
+        # kind of call as /etc/init.d/network reload - a subsystem confused
+        # enough not to respond promptly would hang this indefinitely.
+        # Bounded the same way, and now actually checks whether uci set/
+        # commit succeeded before claiming the hostname changed.
+        if uci set system.@system[0].hostname="$SYS_HOSTNAME" && uci commit system; then
+            timeout 10 /etc/init.d/system reload >/dev/null 2>&1
+            say "Hostname set to $SYS_HOSTNAME"
+            CHANGED=1
+        else
+            err "Failed to set the hostname (uci set/commit failed) - nothing was changed."
+        fi
     else
         say "Skipped."
     fi
