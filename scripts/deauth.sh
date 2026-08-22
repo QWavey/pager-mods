@@ -1206,6 +1206,37 @@ find_target_bssid() {
 # interface sharing the same physical radio as wlan0mon) has to come down
 # first - confirmed elsewhere in this file's history that wlan0mon can't
 # independently set its channel while wlan0 is up ("Resource busy").
+# BIG CHANGE (real consolidation, not a dedup of trivia): "tcpdump for 3s,
+# narrow to auth/assoc-type frames, then check for the target's MAC" was
+# duplicated BYTE-FOR-BYTE between start_sentinel()'s watch loop (below)
+# and run_reactive_strike()'s own per-AP window (further down) - and this
+# is the single most safety/correctness-critical piece of detection logic
+# in this entire file. Both of this file's two hardest-won live-diagnosed
+# bugs - the missing "-e" flag (management frames carry no MAC at all
+# without it) and the wrong RFC-spec frame-type names (this tcpdump build
+# actually prints "Assoc Request"/"ReAssoc Request", not the full spec
+# names) - had to be independently rediscovered and fixed in EACH copy
+# before this consolidation existed. One implementation now: a future fix,
+# or a different tcpdump build printing yet another label variant, only
+# has to land once instead of being silently missed in a sibling copy the
+# way it already was twice.
+#
+# Deliberately NOT merged with find_target_bssid()'s or discover_clients()'
+# own tcpdump use, despite surface similarity - those do genuinely
+# different jobs (find_target_bssid checks for ANY traffic from the target
+# to answer "is it even present here", discover_clients profiles ALL
+# active MACs to find undiscovered ones) with correctly different matching
+# rules, not the same check written twice. Forcing those into this same
+# shape would change what they actually detect, not just deduplicate code.
+watch_for_reconnect() {
+    local iface="$1" target_lc="$2"
+    local hit
+    hit=$(timeout 3 tcpdump -nn -e -l -i "$iface" 2>/dev/null \
+        | grep -iE "Authentication|Assoc Request|ReAssoc Request" \
+        | grep -i "$target_lc")
+    [ -n "$hit" ]
+}
+
 start_sentinel() {
     local target="$1"; shift
     local pairs=("$@")
@@ -1251,17 +1282,7 @@ start_sentinel() {
                 fi
                 local bssid="${pair%%~*}" channel="${pair#*~}"
                 iw dev wlan0mon set channel "$channel" 2>/dev/null
-                # -e prints the frame's link-layer addresses (BSSID/DA/SA)
-                # on the same summary line - see run_reactive_strike()'s
-                # own header comment for why this is required, not
-                # optional: without it, a management-frame line (auth/
-                # assoc/reassoc) carries NO MAC address at all, so the
-                # target-MAC grep just below could never match anything,
-                # ever, regardless of the frame-type keyword.
-                hit=$(timeout 3 tcpdump -nn -e -l -i wlan0mon 2>/dev/null \
-                    | grep -iE "Authentication|Assoc Request|ReAssoc Request" \
-                    | grep -i "$target_lc")
-                [ -n "$hit" ] && echo "$pair" > "$SENTINEL_STATE"
+                watch_for_reconnect wlan0mon "$target_lc" && echo "$pair" > "$SENTINEL_STATE"
             done
         done
     ) &
@@ -1389,28 +1410,11 @@ run_reactive_strike() {
             [ "$STOPPING" = "1" ] && break
             local bssid="${pair%%~*}" channel="${pair#*~}"
             lock_channel "$channel" 3
-            # Watch this AP's channel for up to 3s. "-l" line-buffers
-            # tcpdump's output so grep sees each frame as it's printed,
-            # not batched at buffer-flush/exit - matters here since we
-            # want to react as fast as possible, not wait for the window
-            # to end. "-e" prints the frame's link-layer addresses
-            # (BSSID/DA/SA) on that same summary line - REQUIRED, not
-            # optional: live-verified (synthetic pcap through this exact
-            # tcpdump binary) that a management-frame summary line (auth/
-            # assoc/reassoc) carries NO MAC address at all without it, so
-            # the target-MAC grep just below would silently never match
-            # ANY frame, no matter how long this watched - a complete,
-            # silent failure of reactive mode's whole detection mechanism
-            # that the frame-type keyword fix alone would NOT have caught
-            # (that fix only corrected which lines get through the first
-            # grep; this fixes the second grep having nothing to match
-            # against at all). See the function-level comment above for
-            # why the two greps are ordered frame-type-first, MAC-second.
-            local hit
-            hit=$(timeout 3 tcpdump -nn -e -l -i "$MON_IFACE" 2>/dev/null \
-                | grep -iE "Authentication|Assoc Request|ReAssoc Request" \
-                | grep -i "$target_lc")
-            if [ -n "$hit" ]; then
+            # Watch this AP's channel for up to 3s via the shared
+            # watch_for_reconnect() (see its own header, right before
+            # start_sentinel() above, for the full "-e"/frame-label
+            # history this used to require fixing in two places).
+            if watch_for_reconnect "$MON_IFACE" "$target_lc"; then
                 say "Caught $target reconnecting to $bssid (ch $channel) - striking now."
                 lock_channel "$channel" 3
                 local i=1
