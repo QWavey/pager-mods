@@ -877,6 +877,26 @@ if [ "$DO_BRIDGE" = "1" ]; then
     ip_link add name "$BRIDGE_NAME" type bridge || die "Failed to create bridge (or the call timed out - network stack may be unresponsive; eth0 has been restored to br-lan)."
     ip_link set "$BR_IFACE1" master "$BRIDGE_NAME" || die "Failed to attach $BR_IFACE1 (or the call timed out; eth0 has been restored to br-lan)."
     ip_link set "$BR_IFACE2" master "$BRIDGE_NAME" || die "Failed to attach $BR_IFACE2 (or the call timed out; eth0 has been restored to br-lan)."
+    # BUG FOUND AND FIXED (live-diagnosed - this is very likely why --dhcp's
+    # own lease worked (confirmed live: real DHCP lease obtained, ARP
+    # resolved to the Pager's exact eth0 MAC) but SSH to that new address
+    # still wasn't reachable): a bridge member interface keeps whatever
+    # L3 address/routes it already had BEFORE being enslaved - confirmed
+    # live that BR_IFACE2 (eth1) still carried its own pre-existing address
+    # and default route from ITS OWN separate netifd-managed DHCP client
+    # (a completely different lease than the new one --dhcp requests on the
+    # bridge device itself) even after becoming a bridge slave. A slave
+    # interface can't actually do L3 routing once enslaved - but the STALE
+    # route table entries referencing it don't know that, and can make the
+    # kernel pick the now-useless slave interface for reply traffic instead
+    # of the bridge device that's actually able to send it, silently
+    # eating replies (e.g. a TCP SYN reaching sshd, but its SYN-ACK never
+    # making it back out). Flushing both members' addresses right after
+    # they join the bridge (standard Linux bridging practice - a bridge
+    # slave should never carry its own address once enslaved) removes the
+    # ambiguity regardless of whether --dhcp is even used.
+    timeout "$IP_LINK_TIMEOUT" ip addr flush dev "$BR_IFACE1" 2>/dev/null
+    timeout "$IP_LINK_TIMEOUT" ip addr flush dev "$BR_IFACE2" 2>/dev/null
     ip_link set "$BR_IFACE1" up
     ip_link set "$BR_IFACE2" up
     ip_link set "$BRIDGE_NAME" up
