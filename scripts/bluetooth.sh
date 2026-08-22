@@ -639,7 +639,23 @@ if [ "$DO_DISRUPT" = "1" ]; then
     if [ "$BACKGROUND" = "1" ]; then
         ( trap '' HUP; run_disrupt ) >"$LOGFILE" 2>&1 &
         echo $! > "$PIDFILE"
-        say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
+        # BUG FOUND AND FIXED (found via code review): this was the one
+        # --background launch path in this file with no liveness check at
+        # all - --flood/--jam-area right above already fixed this exact
+        # class ("Started in background" printed unconditionally, even if
+        # ensure_radio_up/hcitool missing made the subshell exit almost
+        # immediately). --disrupt is arguably the more important one to
+        # get right here: it puts the radio into Direct Test Mode, so a
+        # user believing it's "running" when it actually died immediately
+        # could walk away thinking spectrum occupation is happening when
+        # it isn't.
+        sleep 1
+        if is_running; then
+            say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
+        else
+            rm -f "$PIDFILE"
+            die "Disrupt exited immediately - check $LOGFILE (no Bluetooth adapter, or hcitool missing, are the likely causes)."
+        fi
     else
         run_disrupt
     fi
