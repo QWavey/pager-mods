@@ -357,6 +357,12 @@ summarize_pcap() {
     echo
 }
 
+# HTTP request-line / Host-header pattern - shared with summarize_pcap's
+# own "HTTP Host headers seen" section, same reasoning as CREDS_PATTERN
+# above (one definition, no drift between the live watcher and the
+# end-of-capture summary).
+HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
+
 # run_creds_watcher OUTPUT_FILE - INVENTED FEATURE: summarize_pcap only
 # ever scanned for credentials/HTTP activity AFTER the whole capture
 # finished - fine for a quick 30s capture, but for a long --background
@@ -365,32 +371,46 @@ summarize_pcap() {
 # remaining capture is an avoidable gap, and it's the opposite of the
 # "watch it happen live, Wireshark-style" experience this was built for.
 # This periodically (every 5s) re-scans the growing capture file and
-# prints any NEW credential hit (red) or HTTP request the moment it's
-# seen - live, into whatever the capture's own live output is (the
-# terminal in the foreground case, /tmp/pager-sniff.log in the
+# prints any NEW credential hit (red) or HTTP request/Host line the
+# moment it's seen - live, into whatever the capture's own live output is
+# (the terminal in the foreground case, /tmp/pager-sniff.log in the
 # --background case, which is also what the LAN Sniffer payload's
-# on-device live scroller already tails).
+# on-device live scroller already tails). Tracks each pattern's own seen-
+# count separately so neither re-alerts the same match every cycle.
 #
-# BUG FOUND AND FIXED (reported live, twice - "no contacted urls or in
-# red http logins found or displayed", later "really spammy with ip addr
-# which are contacting urls with an arrow ... but for some reason it
-# doesn't display it"): the old version just grepped raw HTTP header/
-# request lines and creds-pattern lines with NO association back to
-# who/what they belonged to - a bare "[HTTP] GET /login HTTP/1.1" line
-# with no source IP or destination host isn't the "IP -> URL, like
-# bettercap/Wireshark" view that was actually asked for, twice. tcpdump
-# -A's own output is one block per packet, each starting with its own
-# "SRC.port > DST.port:" header line - the awk pass below groups by that
-# (verified live against a real capture on this device: correctly paired
-# a GET request with its Host: header and the packet's own source IP)
-# so every hit can be tagged with WHO said it and WHAT it was talking to,
-# same idea as summarize_pcap's own "Top source IPs"/"HTTP Host headers"
-# sections, just applied live instead of only after the capture finishes.
-# Still one single `tcpdump -A -r` read per cycle (not two), same
-# performance reasoning as before - now one awk pass over that one read
-# does both the creds AND the HTTP-with-host job at once.
+# MEASURED AND CHANGED: this used to be two separate functions (one for
+# creds, one originally planned as a separate url-watcher) - each doing
+# its OWN full `tcpdump -A -r file` re-read of the whole capture every
+# cycle. Re-reading a growing file from the start twice per cycle instead
+# of once doubles real CPU work for no benefit on a device that's already
+# memory/CPU-constrained (251MB RAM total, confirmed live) - merged into
+# one pass that checks both patterns from a SINGLE read per cycle.
+#
+# REGRESSION FOUND AND REVERTED (self-inflicted, caught via live timing):
+# a later attempt replaced the two `grep -iE` calls below with a single
+# awk pass that tagged each hit with its packet's source IP and Host
+# header (a real, wanted improvement - "IP -> URL" like bettercap). It
+# worked on small synthetic input, but measured live against a real
+# 18.8k-line `tcpdump -A` dump on this device: the plain `grep -iE
+# "$CREDS_PATTERN"` below takes ~14-22s (already slow, but bounded); the
+# equivalent awk `$0 ~ credspat` dynamic-regex match over every line
+# TIMED OUT past 60s - 4x+ slower for the identical pattern and data,
+# apparently because busybox awk's dynamic (`-v`-supplied) regex matching
+# is far more expensive per line than grep's compiled-once engine. Net
+# effect confirmed live: the awk version never produced a single live tag
+# for a real capture with a real plaintext HTTP request in it (the
+# post-capture summary found it fine; the live watcher's re-scan simply
+# never finished before the next poll, or the capture itself, ended).
+# That's strictly worse than this original version, which - despite also
+# being too slow to keep up with a genuinely busy capture - at least
+# keeps pace during quieter/shorter ones. Reverted rather than ship a
+# confirmed regression; a real fix (grep for the fast full-file filter,
+# then a cheap per-match lookup for just the handful of actual hits
+# instead of a per-line dynamic regex over the whole dump) was prototyped
+# but not yet verified correct - left for a future session, not guessed
+# into production under time pressure.
 run_creds_watcher() {
-    local file="$1" last_size=-1 last_seen=0
+    local file="$1" last_creds=0 last_http=0 last_size=-1
     # is_running (PIDFILE-based) covers --background; for a foreground
     # run there's no PIDFILE, so fall back to "is the sniff.sh process
     # that launched me ($PPID, since this runs as its backgrounded child)
@@ -412,50 +432,29 @@ run_creds_watcher() {
         cur_size=$(wc -c < "$file" 2>/dev/null)
         [ "$cur_size" = "$last_size" ] && continue
         last_size="$cur_size"
+        local dump creds_hits http_hits count new
+        dump=$(tcpdump -A -r "$file" 2>/dev/null)
+        [ -z "$dump" ] && continue
 
-        local rows count new
-        # One block (= one packet) per iteration: track that block's
-        # source IP, Host: header, first request line, and first creds
-        # match, then emit ONE tagged row for it (creds win over a plain
-        # HTTP row if both are present in the same packet - e.g. a GET
-        # with the password right in the query string) the moment the
-        # NEXT packet's header line starts (or at EOF). IGNORECASE=1 is a
-        # real busybox awk feature (confirmed live on this device, not a
-        # GNU-only assumption) - same case-insensitivity as the old
-        # `grep -i` without needing to lowercase everything by hand.
-        rows=$(tcpdump -A -r "$file" 2>/dev/null | awk -v credspat="$CREDS_PATTERN" '
-            BEGIN { IGNORECASE = 1 }
-            function flush_block() {
-                if (creds != "") print "CREDS\t" src "\t" (host == "" ? "?" : host) "\t" creds
-                else if (req != "" || host != "") print "HTTP\t" src "\t" (host == "" ? "?" : host) "\t" req
-            }
-            /^[0-9]+:[0-9]+:[0-9]+\./ {
-                flush_block()
-                src = "?"
-                for (i = 1; i <= NF; i++) {
-                    if ($i == ">") { src = $(i - 1); sub(/\.[0-9]+$/, "", src); break }
-                }
-                host = ""; req = ""; creds = ""
-                next
-            }
-            /^[Hh]ost: / { host = $2; gsub(/\r/, "", host); next }
-            /^(GET|POST|PUT|DELETE|HEAD) \// { if (req == "") { req = $0; gsub(/\r/, "", req) } }
-            $0 ~ credspat { if (creds == "") { creds = $0; gsub(/\r/, "", creds) } }
-            END { flush_block() }
-        ')
-        [ -z "$rows" ] && continue
-        count=$(echo "$rows" | grep -c .)
-        [ "$count" -le "$last_seen" ] && continue
-        new=$(echo "$rows" | tail -n "+$((last_seen + 1))")
-        last_seen="$count"
-        echo "$new" | while IFS="$(printf '\t')" read -r kind src host content; do
-            if [ "$kind" = "CREDS" ]; then
-                printf '[CREDS FOUND] %s -> %s  ' "$src" "$host"
-                echo "$content" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN"
-            else
-                echo "[HTTP] $src -> $host  $content"
+        creds_hits=$(echo "$dump" | grep -iE "$CREDS_PATTERN")
+        if [ -n "$creds_hits" ]; then
+            count=$(echo "$creds_hits" | grep -c .)
+            if [ "$count" -gt "$last_creds" ]; then
+                new=$(echo "$creds_hits" | tail -n "+$((last_creds + 1))")
+                echo "$new" | GREP_COLORS='mt=1;31' grep --color=always -iE "$CREDS_PATTERN" | sed 's/^/[CREDS FOUND] /'
+                last_creds="$count"
             fi
-        done
+        fi
+
+        http_hits=$(echo "$dump" | grep -iE "$HTTP_PATTERN")
+        if [ -n "$http_hits" ]; then
+            count=$(echo "$http_hits" | grep -c .)
+            if [ "$count" -gt "$last_http" ]; then
+                new=$(echo "$http_hits" | tail -n "+$((last_http + 1))")
+                echo "$new" | sed 's/^/[HTTP] /'
+                last_http="$count"
+            fi
+        fi
     done
 }
 

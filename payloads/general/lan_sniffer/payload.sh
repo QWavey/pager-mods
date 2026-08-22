@@ -34,11 +34,17 @@
 #      README.md's postmortem), and without it the option had no visible
 #      payoff from here. sniff.sh --bridge --dhcp is still there directly
 #      if this gets revisited later.
-#   3. sniff.sh's own live watcher (run_creds_watcher) used to tag raw
-#      HTTP/creds lines with no source or destination context - not the
-#      "IP -> URL, like bettercap/Wireshark" view actually asked for.
-#      Fixed there to pair every hit with the packet's own source IP and
-#      (when present) the HTTP Host header it was headed to.
+#   3. sniff.sh's own live watcher (run_creds_watcher) was tried with an
+#      "IP -> URL, like bettercap/Wireshark" tagging improvement, but a
+#      live timing test found the awk-based version 4x+ slower than a
+#      plain grep for the same pattern on this device - slow enough that
+#      it never produced a single live tag for a real capture. Reverted
+#      to the original, proven (if plain) version rather than ship a
+#      confirmed regression - see sniff.sh's own comment on
+#      run_creds_watcher for the measured numbers. The end-of-capture
+#      summary (`sniff.sh --summary`) is unaffected and does show source
+#      IPs and HTTP Host headers correctly - it only runs once, after the
+#      capture, so it was never under the same time pressure.
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -47,11 +53,12 @@
 # stops, shows the summary, then asks whether to save the full log.
 #
 # "Wireshark-like" live content: sniff.sh's own live watcher (see its
-# run_creds_watcher) surfaces HTTP requests (tagged [HTTP], as
-# "SRC_IP -> HOST  METHOD PATH") and credential hits (tagged
-# [CREDS FOUND], matched text highlighted red over SSH) AS THEY'RE SEEN,
-# into the same live-scrolling log this payload tails - not just raw
-# per-packet header lines, and not only in the end-of-capture summary.
+# run_creds_watcher) surfaces HTTP requests/Host headers (tagged [HTTP])
+# and credential hits (tagged [CREDS FOUND], matched text highlighted red
+# over SSH) AS THEY'RE SEEN, into the same live-scrolling log this
+# payload tails - not just in the end-of-capture summary. These are raw
+# lines (no source-IP/host pairing live - see the note above); the full
+# summary at the end of a capture pairs them with source IPs and hosts.
 #
 # HONEST LIMITATION: `WAIT_FOR_INPUT`/`WAIT_FOR_BUTTON_PRESS` are the only
 # documented ways to react to a button press, and both BLOCK until
