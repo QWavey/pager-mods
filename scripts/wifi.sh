@@ -247,12 +247,24 @@ if [ "$DO_ON" = "1" ]; then
         enc=$(uci -q get "wireless.wlan0cli.encryption" 2>/dev/null); [ -z "$enc" ] && enc="psk2"
         if [ -n "$ssid" ]; then
             say "Reconnecting WiFi client to '$ssid'..."
+            # BUG FOUND AND FIXED (found via code review): this was the one
+            # restore branch in this whole block with NO success/failure
+            # check at all - every sibling branch above (mgmt/open/wpa)
+            # correctly reports "Restoring X failed" via `|| err ...`, but
+            # a failed WIFI_CONNECT or a WIFI_WAIT timeout here produced no
+            # indication whatsoever that the client never actually
+            # reconnected - silent, same class already fixed everywhere
+            # else in this toolkit.
             if [ -n "$key" ]; then
-                WIFI_CONNECT wlan0cli "$ssid" "$enc" "$key" ANY
+                WIFI_CONNECT wlan0cli "$ssid" "$enc" "$key" ANY || err "WIFI_CONNECT failed for '$ssid'."
             else
-                WIFI_CONNECT wlan0cli "$ssid" open NONE ANY
+                WIFI_CONNECT wlan0cli "$ssid" open NONE ANY || err "WIFI_CONNECT failed for '$ssid'."
             fi
-            WIFI_WAIT wlan0cli 30
+            if WIFI_WAIT wlan0cli 30; then
+                say "Reconnected to '$ssid'."
+            else
+                err "Did not reconnect to '$ssid' within 30s - check wifi.sh --status."
+            fi
         else
             err "Could not reconnect WiFi client - SSID missing from saved config."
         fi
