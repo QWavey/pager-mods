@@ -95,11 +95,20 @@ payloads/, then the two installer scripts.
 30. [x] scripts/mimic.sh (verdict: left as-is - already fully hardened, no
     confirmed way to add --status without guessing at unverified platform
     internals)
-31. [ ] scripts/openap.sh
-32. [ ] scripts/pc_link.sh
-33. [ ] scripts/pcap.sh
-34. [ ] scripts/reconsession.sh
-35. [ ] scripts/report.sh
+31. [x] scripts/openap.sh - added confirm() gates to --on/--off/--hide (same
+    zero-confirmation gap as mgmt.sh, worded for Open AP's actual risk -
+    disrupting connected clients mid-engagement, not a management lockout)
+32. [x] scripts/pc_link.sh (verdict: left as-is - already very solid, real
+    exit-code propagation, eth0/SSH-traffic warning, no genuine gap found)
+33. [x] scripts/pcap.sh (verdict: left as-is - trivial, already hardened)
+34. [x] scripts/reconsession.sh - added confirm() gate to --new (starts a
+    fresh recon session with zero confirmation before; --pause/--resume
+    left alone since they're trivially reversible)
+35. [x] scripts/report.sh - added a live-verified "Other loot" section that
+    flags any loot subdirectory not covered by a named section, the same
+    class of drift this file's own history already shows happened twice
+    for real (pc_link's directory, wigle/payload-runs/archive missing
+    entirely from an earlier version)
 36. [ ] scripts/reset.sh
 37. [ ] scripts/ringtone.sh
 38. [ ] scripts/screen.sh

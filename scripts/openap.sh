@@ -61,14 +61,27 @@ if [ "$DO_CLEAR" = "1" ]; then
     exit 0
 fi
 
+INTERACTIVE=0
+[ "$DO_ON" = "0" ] && [ "$DO_OFF" = "0" ] && [ "$DO_HIDE" = "0" ] && [ "$DO_CLEAR" = "0" ] && INTERACTIVE=1
+
 # BUG FOUND AND FIXED (found via code review, same class as the last_ssid
 # fix below): these printed a success message unconditionally regardless
 # of whether WIFI_OPEN_AP_HIDE/_DISABLE actually succeeded.
+#
+# BIG CHANGE (same gap found and fixed in mgmt.sh this sweep): --off/--hide
+# fired IMMEDIATELY with no confirmation at all, ever, even without -y. The
+# risk here is different from mgmt.sh's (this is wlan0open, not the
+# management AP, so it can't disconnect your own SSH/control session) but
+# still real: silently killing an Open AP that has real connected clients
+# mid-engagement, with zero warning, is exactly the kind of "no feedback
+# before an irreversible-feeling action" gap this session's other fixes
+# were about. Skipped when INTERACTIVE already asked, to avoid asking twice.
+if [ "$INTERACTIVE" != "1" ] && [ "$ASSUME_YES" != "1" ]; then
+    [ "$DO_HIDE" = "1" ] && { confirm "Hide the Open AP's SSID? Any devices actively probing for it by name will stop finding it." || die "Aborted."; }
+    [ "$DO_OFF" = "1" ] && { confirm "Disable the Open AP? This disconnects any clients currently connected to it." || die "Aborted."; }
+fi
 [ "$DO_HIDE" = "1" ] && { WIFI_OPEN_AP_HIDE wlan0open && say "Open AP hidden." || err "Failed to hide the Open AP."; }
 [ "$DO_OFF" = "1" ] && { WIFI_OPEN_AP_DISABLE wlan0open && say "Open AP disabled." || err "Failed to disable the Open AP."; }
-
-INTERACTIVE=0
-[ "$DO_ON" = "0" ] && [ "$DO_OFF" = "0" ] && [ "$DO_HIDE" = "0" ] && [ "$DO_CLEAR" = "0" ] && INTERACTIVE=1
 
 if [ "$INTERACTIVE" = "1" ]; then
     echo "== openap.sh =="
@@ -80,6 +93,9 @@ fi
 
 if [ "$DO_ON" = "1" ]; then
     [ -z "$SSID" ] && die "--name is required with --on."
+    if [ "$INTERACTIVE" != "1" ] && [ "$ASSUME_YES" != "1" ]; then
+        confirm "Enable the Open AP as '$SSID'?" || die "Aborted."
+    fi
     # BUG FOUND AND FIXED (found via code review): cfg_set ran unconditionally
     # even when WIFI_OPEN_AP failed, so a rejected SSID was still remembered
     # as "last_ssid" and offered again next time as if it had worked.

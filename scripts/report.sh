@@ -176,6 +176,30 @@ gen_report() {
     echo "- $n file(s) already archived in $LOOT_ROOT/archive/"
     echo
 
+    # BIG CHANGE: every section above is a hardcoded, named directory - the
+    # exact same class of drift this file's own bug-fix history already
+    # shows happened twice for real (pc_link's captures counting a
+    # directory nothing wrote to; wigle/payload-runs/archive missing
+    # entirely from an earlier version). Rather than trust that the list
+    # above stays complete forever, scan for any loot subdirectory NOT
+    # explicitly covered by a section above and call it out - so a future
+    # new capture type doesn't just silently vanish from this report the
+    # way past ones already did before being caught.
+    local known="handshakes lanscan deadnet sniff pcap bluetooth wigle payload-runs archive reports"
+    local other_found=0 d base cnt
+    for d in "$LOOT_ROOT"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        case " $known " in *" $base "*) continue ;; esac
+        if [ "$other_found" = "0" ]; then
+            echo "## Other loot (not covered by a section above)"
+            other_found=1
+        fi
+        cnt=$(count_files "$d")
+        echo "- $base/: $cnt file(s) - this report needs a proper section for it if it's a real, ongoing capture type"
+    done
+    [ "$other_found" = "1" ] && echo
+
     local total_size
     total_size=$(du -sh "$LOOT_ROOT" 2>/dev/null | awk '{print $1}')
     echo "## Total loot size"
