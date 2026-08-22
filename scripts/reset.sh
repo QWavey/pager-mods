@@ -236,6 +236,24 @@ reset_processes() {
     # a clean signal). No `pkill` on this busybox build (confirmed earlier
     # this session) - `killall` (by name) is the real tool available here.
     command -v killall >/dev/null 2>&1 && { killall tcpdump >/dev/null 2>&1; killall l2ping >/dev/null 2>&1; }
+    # BUG FOUND AND FIXED (CRITICAL, live-caught): `sniff.sh --stop` above
+    # only ever stops a CAPTURE - it has no idea the bridge watchdog even
+    # exists, that's exclusively reset_network()'s job further down, gated
+    # on --network specifically being selected. Confirmed live: a user who
+    # only picks "Processes" (not "Network") from the reset menu - exactly
+    # what happened here - leaves an orphaned bridge watchdog (see sniff.sh
+    # start_lan_watchdog()'s own matching fix) running its 5s reconciler
+    # loop for up to an hour (MAX_BRIDGE_SECS) with nothing to stop it,
+    # found live 11 minutes after its own bridge had already been torn
+    # apart by other means. Killing the watchdog PROCESS belongs here (a
+    # process-cleanup step, same domain as the sniff.sh --stop call right
+    # above it) even though this function deliberately does NOT touch
+    # actual network/bridge topology - that stays exclusively
+    # reset_network()'s job, unchanged, so a "Processes only" reset still
+    # can't restore SSH/undo a bridge by itself. This only stops the
+    # runaway monitoring loop from continuing to interfere regardless of
+    # which reset scope was picked.
+    [ -f /tmp/pager-sniff-watchdog.pid ] && { kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null; rm -f /tmp/pager-sniff-watchdog.pid; }
     if [ -n "$failed_scripts" ]; then
         err "These scripts' --stop returned a non-zero exit (unexpected - every --stop handler in this toolkit normally exits 0 either way):$failed_scripts"
     else

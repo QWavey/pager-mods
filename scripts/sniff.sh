@@ -974,6 +974,32 @@ stop_bridge_dhcp() {
 MAX_BRIDGE_SECS="${PAGER_MAX_BRIDGE_SECS:-3600}"
 
 start_lan_watchdog() {
+    # BUG FOUND AND FIXED (CRITICAL, live-caught): this never checked for
+    # or killed a PRE-EXISTING watchdog before overwriting WATCHDOG_PIDFILE
+    # with a new one. Confirmed live: a --bridge invoked over SSH whose
+    # controlling session then dies (a dropped connection, exactly what
+    # happens on every plain-bridge test - the client side goes dark the
+    # instant eth0 leaves br-lan) never gets a chance to run --unbridge,
+    # so its watchdog subshell is orphaned - still alive, still running its
+    # 5s loop - with nothing left tracking or ever killing it, because the
+    # VERY NEXT --bridge (a retry, or the LAN Sniffer payload run again)
+    # just calls this function again and silently clobbers WATCHDOG_PIDFILE
+    # with the NEW watchdog's PID. --unbridge/reset.sh's own network step
+    # only ever kill whatever PID the file CURRENTLY points to, so the
+    # orphaned one from the FIRST attempt becomes permanently untracked and
+    # unkillable short of `ps`-hunting for it by hand or waiting out
+    # MAX_BRIDGE_SECS (up to an hour). Found running 11 minutes after its
+    # own bridge had already been torn apart by other means, spending that
+    # whole time re-evaluating canonicalize_lan_topology(bridged, ...)
+    # every 5s against network state that had long since moved on -
+    # plausible contributor to intermittent connectivity reports during
+    # that window, independent of whatever bridge/test was active at the
+    # time. Kill and clear any existing watchdog first, every time, so at
+    # most one can ever be alive.
+    if [ -f "$WATCHDOG_PIDFILE" ]; then
+        kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
+        rm -f "$WATCHDOG_PIDFILE"
+    fi
     local _start_ts
     _start_ts=$(date +%s 2>/dev/null || echo 0)
     echo "$_start_ts" > "$BRIDGE_STARTED_FILE" 2>/dev/null
