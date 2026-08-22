@@ -329,6 +329,15 @@ reset_network() {
         kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null
         rm -f /tmp/pager-sniff-watchdog.pid
     fi
+    # BIG CHANGE (same "every teardown path must clean up, not just the
+    # happy one" discipline as the watchdog stop above): --bridge --dhcp
+    # (see sniff.sh's own start_bridge_dhcp) can leave a udhcpc client
+    # running against br-sniff - stop it here too, same pattern.
+    if [ -f /tmp/pager-sniff-bridge-dhcp.pid ]; then
+        _dhcp_pid=$(cat /tmp/pager-sniff-bridge-dhcp.pid 2>/dev/null)
+        [ -n "$_dhcp_pid" ] && kill "$_dhcp_pid" 2>/dev/null
+        rm -f /tmp/pager-sniff-bridge-dhcp.pid
+    fi
     say "Tearing down any leftover LAN Sniffer bridge (br-sniff)..."
     # BUG FOUND AND FIXED (CRITICAL): these `ip link` calls had no timeout
     # either - the exact same netlink-hang risk already fixed for sniff.sh

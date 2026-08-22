@@ -283,6 +283,15 @@ case "$__mode" in
             LOG "User cancelled."
             exit 0
         fi
+        # NEW FEATURE (asked for directly - "keep the sniffing while keeping
+        # ssh... over the LAN"): bridging eth0 normally means SSH-over-USB-C
+        # stops working for the whole session (eth0 leaves br-lan, which is
+        # what that management IP rides on) - see sniff.sh's own
+        # start_bridge_dhcp() for the real mechanism this uses to fix that.
+        __dhcp_args=()
+        if CONFIRMATION_DIALOG "Also try to get a real IP on this LAN via DHCP, so SSH stays reachable here too (no reset needed afterward)? Bridge/tap itself works either way - this is a bonus, not a requirement."; then
+            __dhcp_args=(--dhcp)
+        fi
         # BUG FOUND AND FIXED (reported live - "it just stayed here" showing
         # nothing but the platform's own default launch splash, for the
         # whole window between confirming and the bridge coming up): no
@@ -325,7 +334,12 @@ case "$__mode" in
         # never gets replaced because LOG/ERROR_DIALOG below never runs.
         # 60s comfortably exceeds the worst case of every internal 5s
         # ip_link timeout firing in sequence (at most ~10 calls = 50s).
-        if ! __bridge_out=$(timeout 60 /root/scripts/sniff.sh --bridge eth0 "$__a" -y 2>&1); then
+        # Widened to 90s when --dhcp is in play - start_bridge_dhcp() has
+        # its own internal ~20s bound for the DHCP negotiation itself, on
+        # top of the bridge setup this timeout was already sized for.
+        __bridge_timeout=60
+        [ "${#__dhcp_args[@]}" -gt 0 ] && __bridge_timeout=90
+        if ! __bridge_out=$(timeout "$__bridge_timeout" /root/scripts/sniff.sh --bridge eth0 "$__a" "${__dhcp_args[@]}" -y 2>&1); then
             LOG "$__bridge_out"
             ERROR_DIALOG "Failed to create the bridge (or it timed out) - see log for details. eth0 should already be restored to br-lan by sniff.sh's own safety net."
             exit 1

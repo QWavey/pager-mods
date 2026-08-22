@@ -14,7 +14,7 @@
 #
 # Usage:
 #   sniff.sh --iface eth1 [--filter "tcpdump expr"] [--duration SECONDS] [--count N]
-#   sniff.sh --bridge IFACE1 IFACE2       bridge two NICs into a transparent tap (br-sniff)
+#   sniff.sh --bridge IFACE1 IFACE2 [--dhcp]  bridge two NICs into a transparent tap (br-sniff)
 #   sniff.sh --unbridge                     tear the bridge back down
 #   sniff.sh --list                           list candidate wired interfaces
 #   sniff.sh --adapters                         check USB-C + USB-A wired adapter status
@@ -34,6 +34,10 @@
 #   --background                     Launch capture detached (still writes live packet text
 #                                        into /tmp/pager-sniff.log - `tail -f` it, or --stop to end it)
 #   --no-summary                       Skip the auto-summary/creds scan after capture
+#   --dhcp                                With --bridge: also request a real DHCP lease on the
+#                                            bridge device from the LAN being tapped, so the
+#                                            Pager stays reachable by SSH there too - no reset
+#                                            needed after a normal bridge/unbridge cycle.
 #   -y, --yes                            Don't prompt for confirmation
 #   -h, --help                             This help
 #
@@ -68,7 +72,7 @@ usage() { print_help "$0"; exit 1; }
 
 IFACE=""; FILTER=""; DURATION=""; COUNT=""; LIVE=1; OUTPUT=""; BACKGROUND=0; NO_SUMMARY=0
 DO_BRIDGE=0; DO_UNBRIDGE=0; DO_LIST=0; DO_SUMMARY_ONLY=""; SUMMARY_FLAG_GIVEN=0; DO_STATUS=0; DO_STOP=0; DO_ADAPTERS=0
-BR_IFACE1=""; BR_IFACE2=""
+BR_IFACE1=""; BR_IFACE2=""; BRIDGE_DHCP=0
 
 # ip_link - thin wrapper around every `ip link` call this script makes.
 # BUG FOUND AND FIXED (CRITICAL - very likely a real contributor to a live
@@ -170,6 +174,7 @@ while [ $# -gt 0 ]; do
         # vpn.sh --enable-full, etc.) does a single "$# -lt N" check
         # instead of reusing the single-arg need_arg helper twice.
         --bridge) DO_BRIDGE=1; [ "$#" -lt 3 ] && die "--bridge needs two interface names, e.g. --bridge eth0 eth1"; BR_IFACE1="$2"; BR_IFACE2="$3"; shift 3 ;;
+        --dhcp) BRIDGE_DHCP=1; shift ;;
         --unbridge) DO_UNBRIDGE=1; shift ;;
         --list) DO_LIST=1; shift ;;
         --adapters) DO_ADAPTERS=1; shift ;;
@@ -617,6 +622,68 @@ fi
 WATCHDOG_PIDFILE="/tmp/pager-sniff-watchdog.pid"
 BRIDGE_STARTED_FILE="/tmp/pager-sniff-bridge-started"
 
+# BIG CHANGE (real feature, asked for directly - "keep the sniffing while
+# keeping ssh... over the LAN"): --bridge's whole premise up to now was
+# "the Pager becomes an invisible tap - it has no address of its own on
+# either side, it just forwards" - which is EXACTLY what makes SSH-over-
+# USB-C stop working the moment eth0 joins the bridge (eth0 was br-lan's
+# only physical port; once it's gone, br-lan's own 172.16.52.1 has nothing
+# to ride on). --dhcp (used alongside --bridge) changes that: it requests
+# a REAL DHCP lease directly on the bridge device itself, from the SAME
+# upstream network the bridge is now tapping - the same way any other
+# device physically plugged into that network would get one. The Pager
+# becomes a genuine, addressable member of that LAN for as long as the
+# bridge is up, reachable by SSH at whatever address the router hands it
+# (from the tethered PC, or anywhere else on that network) - not just the
+# isolated 172.16.52.0/24 management subnet. Uses busybox's own stock
+# /usr/share/udhcpc/default.script (confirmed present on this device) -
+# a plain `ip addr add`/`route add` script with NO netifd dependency,
+# deliberately NOT the netifd-managed dhcp.script eth1's own DHCP client
+# uses (that script assumes netifd is tracking the interface, which it
+# isn't for this ad-hoc bridge device). Bounded (a fixed discover-attempt
+# budget, `-n` = exit rather than hang if no lease comes back) so a dead-
+# end network can't turn this into an indefinite hang - the bridge/tap
+# itself is still fully functional either way, this is a genuine bonus on
+# top, not a dependency the core feature needs to work.
+BRIDGE_DHCP_PIDFILE="/tmp/pager-sniff-bridge-dhcp.pid"
+
+start_bridge_dhcp() {
+    command -v udhcpc >/dev/null 2>&1 || { err "udhcpc not found - can't request a DHCP lease on $BRIDGE_NAME. The bridge/tap itself is still fully working, just without its own address on the LAN."; return 1; }
+    say "Requesting a DHCP lease on $BRIDGE_NAME from the LAN this bridge is tapping (up to ~20s)..."
+    if timeout 20 udhcpc -i "$BRIDGE_NAME" -p "$BRIDGE_DHCP_PIDFILE" -t 5 -T 3 -n >/tmp/pager-sniff-dhcp.log 2>&1; then
+        local _ip
+        _ip=$(ip -4 -o addr show "$BRIDGE_NAME" 2>/dev/null | awk '{print $4}' | head -1)
+        if [ -n "$_ip" ]; then
+            say "Got a lease: $_ip - SSH now reachable there too (from the tethered PC, or anywhere else on this LAN), no reset needed when the bridge/tap session ends normally."
+        else
+            err "udhcpc reported success but no IPv4 address showed up on $BRIDGE_NAME - check $BRIDGE_DHCP_PIDFILE / /tmp/pager-sniff-dhcp.log."
+        fi
+    else
+        err "No DHCP lease obtained on $BRIDGE_NAME within the time budget (check /tmp/pager-sniff-dhcp.log) - the bridge/tap is still fully working, just without its own address on this LAN. Management stays reachable the normal way (USB-C/br-lan, until the bridge ends) or over Management WiFi if it's configured."
+        rm -f "$BRIDGE_DHCP_PIDFILE"
+        return 1
+    fi
+}
+
+# stop_bridge_dhcp - counterpart to start_bridge_dhcp() above, called from
+# every teardown path (stop_lan_watchdog() below, the MAX_BRIDGE_SECS
+# forced-teardown branch, --unbridge, AND reset.sh's own br-sniff teardown
+# - same "every exit path must clean up, not just the happy one"
+# discipline already established for the watchdog itself). Releasing the
+# lease (-R) is a courtesy to the DHCP server (frees the lease sooner
+# instead of making it wait out the full lease time for an inactive
+# client) - harmless no-op if nothing was ever running.
+stop_bridge_dhcp() {
+    if [ -f "$BRIDGE_DHCP_PIDFILE" ]; then
+        local _pid
+        _pid=$(cat "$BRIDGE_DHCP_PIDFILE" 2>/dev/null)
+        [ -n "$_pid" ] && kill -USR2 "$_pid" 2>/dev/null
+        sleep 0.2
+        [ -n "$_pid" ] && kill "$_pid" 2>/dev/null
+        rm -f "$BRIDGE_DHCP_PIDFILE"
+    fi
+}
+
 # MAX_BRIDGE_SECS - INVENTED FEATURE, a SECOND, trap-independent safety
 # net. The only thing that normally restores eth0 to br-lan after a bridge
 # session ends is payload.sh's own `trap '.../--unbridge...' EXIT` (plus,
@@ -673,6 +740,7 @@ start_lan_watchdog() {
                 _now=$(date +%s 2>/dev/null)
                 case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
                 if [ "$_now" -gt 0 ] && [ "$_now" -ge "$_deadline" ]; then
+                    stop_bridge_dhcp
                     ip_link set "$BRIDGE_NAME" down 2>/dev/null
                     ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
                     ip_link set eth0 master br-lan 2>/dev/null
@@ -705,6 +773,7 @@ stop_lan_watchdog() {
         rm -f "$WATCHDOG_PIDFILE"
     fi
     rm -f "$BRIDGE_STARTED_FILE"
+    stop_bridge_dhcp
 }
 
 if [ "$DO_UNBRIDGE" = "1" ]; then
@@ -819,6 +888,11 @@ if [ "$DO_BRIDGE" = "1" ]; then
     say "Tear it down later with: sniff.sh --unbridge"
     start_lan_watchdog
     say "LAN watchdog running in the background - auto-recovers SSH/eth0-in-br-lan if the bridge ever leaves it disconnected."
+    # --dhcp (see start_bridge_dhcp's own header for the full story) - a
+    # deliberate bonus, not a dependency: a failed/slow lease here never
+    # aborts the bridge itself, which is already fully up and tapping
+    # traffic by this point regardless of what happens next.
+    [ "$BRIDGE_DHCP" = "1" ] && start_bridge_dhcp
     exit 0
 fi
 
