@@ -26,7 +26,12 @@ usage() { print_help "$0"; exit 1; }
 # message unconditionally regardless of the underlying WIGLE_* command's
 # real exit code.
 case "${1:-}" in
-    --login) shift; if [ $# -ge 2 ]; then WIGLE_LOGIN "$1" "$2"; else WIGLE_LOGIN; fi ;;
+    # BUG FOUND AND FIXED (found via code review): this CLI path had NO
+    # success/failure check at all, unlike its own interactive-menu
+    # counterpart below (choice 1) which already checks WIGLE_LOGIN's exit
+    # code - the CLI form (the one actually meant to be scripted) was the
+    # one silently swallowing a failed login.
+    --login) shift; if [ $# -ge 2 ]; then WIGLE_LOGIN "$1" "$2"; else WIGLE_LOGIN; fi || die "Wigle login failed." ;;
     --logout) WIGLE_LOGOUT && say "Logged out of Wigle." || die "Failed to log out of Wigle." ;;
     --start) f=$(WIGLE_START) && say "Wigle log started: ${f:-see $LOOT_DIR}" || die "Failed to start the Wigle log." ;;
     # BUG FOUND AND FIXED (same class found and fixed across reset.sh/
@@ -81,10 +86,17 @@ case "${1:-}" in
                 # unexpanded string "$LOOT_DIR/*" straight to WIGLE_UPLOAD,
                 # which would try to upload a nonexistent file named "*"
                 # instead of failing with a clear message.
+                # BUG FOUND AND FIXED (found via code review, same
+                # "unconditional/no success feedback" class this file's own
+                # header already documents fixing everywhere else - missed
+                # in this one interactive choice, the exact call this
+                # script exists for. WIGLE_UPLOAD's real exit code was
+                # silently discarded here, unlike the CLI --upload path
+                # right above which already checks it.
                 if ! ls "$LOOT_DIR"/* >/dev/null 2>&1; then
                     say "No files in $LOOT_DIR to upload."
                 elif confirm "Upload all files in $LOOT_DIR ?"; then
-                    WIGLE_UPLOAD "$LOOT_DIR"/*
+                    WIGLE_UPLOAD "$LOOT_DIR"/* && say "Upload finished." || err "Upload failed - check network connectivity and Wigle login (wigle.sh --login)."
                 fi
                 ;;
             *) say "Nothing to do." ;;

@@ -263,24 +263,57 @@
     // -- PineAP --
     mimicOn:  { out: "pineapOut", script: "mimic.sh", args: ["--on"], timeout: 15 },
     mimicOff: { out: "pineapOut", script: "mimic.sh", args: ["--off"], timeout: 15 },
+    // BUG FOUND AND FIXED (found via code review, same class just fixed for
+    // reconNew above): openap.sh --on/--off and mgmt.sh --on/--off are all
+    // gated behind a confirm() prompt whenever ASSUME_YES isn't set (openap.sh
+    // for --off, mgmt.sh for both --on and --off - see those files' own
+    // comments on why). None of these four passed "-y", so none of them
+    // could actually complete non-interactively through server.py's
+    // subprocess - confirm()'s `read` on a stdin with nothing behind it
+    // either dies immediately with "Aborted." or blocks until this
+    // action's own timeout. Added "-y" (server-side bypass) plus a
+    // confirm() (this file's substitute gate for the browser) for the two
+    // that are actually consequential the same way EvilTwin/mgmt's own
+    // CLI paths already treat them - openOn doesn't need one (turning on
+    // an Open AP has no "disconnects you" risk the way disabling one, or
+    // touching the Management AP, does).
     openOn: {
       out: "pineapOut", script: "openap.sh", timeout: 20,
-      build: () => { const ssid = val("openSsid"); return ssid ? { args: ["--on", "--name", ssid] } : { abort: "Enter an Open AP SSID first." }; },
+      build: () => { const ssid = val("openSsid"); return ssid ? { args: ["--on", "--name", ssid, "-y"] } : { abort: "Enter an Open AP SSID first." }; },
     },
-    openOff: { out: "pineapOut", script: "openap.sh", args: ["--off"], timeout: 15 },
+    openOff: {
+      out: "pineapOut", script: "openap.sh", args: ["--off", "-y"], timeout: 15,
+      confirm: () => "Disable the Open AP? This disconnects any clients currently connected to it.",
+    },
     mgmtOn: {
       out: "pineapOut", script: "mgmt.sh", timeout: 20,
       build: () => {
         const ssid = val("mgmtSsid"), pw = val("mgmtPw");
-        return (ssid && pw) ? { args: ["--on", "--name", ssid, "--pw", pw] } : { abort: "Mgmt AP needs both an SSID and a password." };
+        return (ssid && pw) ? { args: ["--on", "--name", ssid, "--pw", pw, "-y"], ssid } : { abort: "Mgmt AP needs both an SSID and a password." };
       },
+      confirm: (ctx) => `Set the Management AP to "${ctx.ssid}"? If you're connected to it over Management WiFi right now (not USB-C), you'll need to reconnect with the new credentials afterward.`,
     },
-    mgmtOff: { out: "pineapOut", script: "mgmt.sh", args: ["--off"], timeout: 15 },
+    mgmtOff: {
+      out: "pineapOut", script: "mgmt.sh", args: ["--off", "-y"], timeout: 15,
+      confirm: () => "Disable the Management AP? If you're connected to it over Management WiFi right now (not USB-C), this WILL disconnect your current session.",
+    },
 
     // -- Recon --
     hopPause:  { out: "reconOut", script: "reconsession.sh", args: ["--pause"], timeout: 15 },
     hopResume: { out: "reconOut", script: "reconsession.sh", args: ["--resume"], timeout: 15 },
-    reconNew:  { out: "reconOut", script: "reconsession.sh", args: ["--new"], timeout: 15 },
+    // BUG FOUND AND FIXED (found via code review): reconsession.sh --new is
+    // gated behind a confirm() prompt (added earlier this session) - every
+    // other ACTIONS entry that calls a confirm()-gated script passes "-y"
+    // (this file's own confirmAuthorized() is the substitute gate for the
+    // browser), but this one was missed. server.py's subprocess.run()
+    // doesn't redirect the child's stdin, so confirm()'s `read` here either
+    // hits immediate EOF (ASSUME_YES unset -> "Aborted.") or blocks until
+    // this action's own request timeout - either way, clicking this button
+    // could never actually start a new recon session.
+    reconNew:  {
+      out: "reconOut", script: "reconsession.sh", args: ["--new", "-y"], timeout: 15,
+      confirm: () => "Start a fresh recon session? Whatever was accumulating under the current one keeps existing in the database, but a new session becomes the active one.",
+    },
 
     // -- Payload Runner --
     payloadRun: {
