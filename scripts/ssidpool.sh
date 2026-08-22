@@ -7,7 +7,7 @@
 #   ssidpool.sh add "SSID" ["SSID2" ...]
 #   ssidpool.sh delete "SSID" ["SSID2" ...]
 #   ssidpool.sh list
-#   ssidpool.sh clear
+#   ssidpool.sh clear [-y]
 #   ssidpool.sh --on [random]      start advertising the pool (optional random BSSID)
 #   ssidpool.sh --off                stop advertising
 #   ssidpool.sh --collect on|off       auto-collect probed SSIDs into the pool
@@ -18,6 +18,23 @@ TOOL_NAME="ssidpool.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
+
+# BUG FOUND AND FIXED (found via code review): this file never defined a
+# -y/--yes flag, unlike every other script with a confirm() gate on a CLI
+# action - `ssidpool.sh clear` could never be automated/scripted, always
+# blocking on an interactive prompt with no bypass. confirm() already
+# respects ASSUME_YES (lib/common.sh) - filtered OUT of "$@" entirely
+# (not just detected) so it can never accidentally become a literal SSID
+# argument to add/delete (which take a variable-length "$@" of their own
+# and never needed -y to begin with).
+_filtered_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        -y|--yes) ASSUME_YES=1 ;;
+        *) _filtered_args+=("$_arg") ;;
+    esac
+done
+set -- "${_filtered_args[@]}"
 
 # BUG FOUND AND FIXED (found via code review, same class already fixed in
 # dns.sh/dnsspoof.sh/gps.sh/mgmt.sh/openap.sh/pcap.sh/reconsession.sh):
