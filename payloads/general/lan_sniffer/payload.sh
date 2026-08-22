@@ -287,6 +287,18 @@ case "$__mode" in
             exit 1
         fi
         LOG "$__bridge_out"
+        # BUG FOUND AND FIXED (reported live): after a successful bridge,
+        # sniff.sh's own multi-line success output (5-6 lines) fills the
+        # visible log, then pick_duration() immediately calls LIST_PICKER -
+        # a real on-screen prompt waiting for a physical button press, but
+        # with nothing distinguishing "still working" from "waiting on
+        # you" after a wall of text just scrolled by. Looked exactly like
+        # a hang (confirmed live: the underlying bridge had actually
+        # already come up successfully - kernel logs showed both ports
+        # reach forwarding state - the payload was just sitting at an
+        # unannounced prompt). A one-off ALERT here (not LOG, which could
+        # stay buried in the scroll) makes the transition unmistakable.
+        ALERT "Bridge is up - pick a capture duration next"
         # BUG FOUND AND FIXED: previously the ONLY --unbridge call was
         # after run_live_capture returned successfully - if anything
         # between here and there went wrong (a cancelled picker, an
