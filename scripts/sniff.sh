@@ -67,7 +67,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 usage() { print_help "$0"; exit 1; }
 
 IFACE=""; FILTER=""; DURATION=""; COUNT=""; LIVE=1; OUTPUT=""; BACKGROUND=0; NO_SUMMARY=0
-DO_BRIDGE=0; DO_UNBRIDGE=0; DO_LIST=0; DO_SUMMARY_ONLY=""; DO_STATUS=0; DO_STOP=0; DO_ADAPTERS=0
+DO_BRIDGE=0; DO_UNBRIDGE=0; DO_LIST=0; DO_SUMMARY_ONLY=""; SUMMARY_FLAG_GIVEN=0; DO_STATUS=0; DO_STOP=0; DO_ADAPTERS=0
 BR_IFACE1=""; BR_IFACE2=""
 
 # ip_link - thin wrapper around every `ip link` call this script makes.
@@ -173,7 +173,7 @@ while [ $# -gt 0 ]; do
         --unbridge) DO_UNBRIDGE=1; shift ;;
         --list) DO_LIST=1; shift ;;
         --adapters) DO_ADAPTERS=1; shift ;;
-        --summary) need_arg "--summary" "$#"; DO_SUMMARY_ONLY="$2"; shift 2 ;;
+        --summary) need_arg "--summary" "$#"; DO_SUMMARY_ONLY="$2"; SUMMARY_FLAG_GIVEN=1; shift 2 ;;
         --status) DO_STATUS=1; shift ;;
         --stop) DO_STOP=1; shift ;;
         -y|--yes) ASSUME_YES=1; shift ;;
@@ -477,7 +477,29 @@ run_packet_feed() {
     done
 }
 
-if [ -n "$DO_SUMMARY_ONLY" ]; then
+# BUG FOUND AND FIXED (live-diagnosed via a real device report - "not
+# spamming with IPs" AND "not asking to save the log" on the SAME LAN
+# Sniffer bridge run both traced back to this one call site): this only
+# ever checked `-n "$DO_SUMMARY_ONLY"` (is the VALUE non-empty), which is
+# indistinguishable from "--summary was never passed at all" - if the
+# CALLER passed `--summary ""` (an empty string, not omitting the flag
+# entirely), this whole block was silently skipped and execution fell
+# through into the NORMAL capture flow further down (interactive mode,
+# since IFACE/DO_LIST/etc are all unset) - completely unrelated to "just
+# print a summary and exit". Confirmed this is exactly what happened: the
+# lan_sniffer payload's own CAPTURE_FILE is derived by grepping sniff.sh's
+# own launch output for a .pcap path - if that earlier --background launch
+# never actually produced one (see run_live_capture()'s own missing
+# liveness check, fixed in the payload), CAPTURE_FILE ends up "", and
+# `sniff.sh --summary ""` silently became an unplanned interactive-mode
+# invocation with no real TTY behind it, in a plain (non-timeout-wrapped)
+# command substitution in the payload - explaining the missing save-log
+# prompt too (the payload never got past this stuck/misdirected call to
+# reach it). Track whether --summary was actually GIVEN separately from
+# its value, so a blank value now fails loudly and immediately instead of
+# silently misrouting into a different code path entirely.
+if [ "$SUMMARY_FLAG_GIVEN" = "1" ]; then
+    [ -z "$DO_SUMMARY_ONLY" ] && die "--summary needs a .pcap file path (got an empty value - the capture this came from may not have actually started; check its own log)."
     summarize_pcap "$DO_SUMMARY_ONLY"
     exit 0
 fi

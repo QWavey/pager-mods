@@ -178,9 +178,32 @@ run_live_capture() {
     # line (returns almost instantly since --background) instead of
     # guessing it back afterward via `ls -t` - exact, not "probably the
     # newest file".
-    local __launch_out
+    local __launch_out __launch_rc
     __launch_out=$(/root/scripts/sniff.sh "${args[@]}" 2>&1)
+    __launch_rc=$?
     CAPTURE_FILE=$(echo "$__launch_out" | grep -oE '/root/loot/sniff/[^ ]+\.pcap' | head -1)
+
+    # BUG FOUND AND FIXED (live-diagnosed via a real device report - "not
+    # spamming with IPs and stuff" and, on the same run, "not asking to
+    # save the log"): this launch's own exit code was never checked at
+    # all - unlike every other --background launch in this toolkit
+    # (deauth/bluetooth/sniff's own --bridge above, tracer, PayloadRunner),
+    # which all verify the launch actually survived before proceeding.
+    # If it fails (bad interface, tcpdump missing, a bad --filter),
+    # CAPTURE_FILE ends up empty (nothing for the grep to match) and this
+    # used to just barrel ahead into start_scroll()/WAIT_FOR_INPUT anyway -
+    # tailing a log file that was never going to get new lines, looking
+    # exactly like "not spamming" instead of the clear failure it actually
+    # was. Worse, the empty CAPTURE_FILE later got handed straight to
+    # `sniff.sh --summary ""` after the wait loop - sniff.sh's own fix for
+    # THAT (see its own comment) means it now fails loudly instead of
+    # silently misrouting into an unrelated interactive prompt, but this
+    # is the right place to catch it, before ever entering the wait loop.
+    if [ "$__launch_rc" -ne 0 ] || [ -z "$CAPTURE_FILE" ]; then
+        LOG "$__launch_out"
+        ERROR_DIALOG "Capture failed to start on $iface - see log for why (a bad interface, tcpdump missing, or an invalid filter are the likely causes)."
+        return 1
+    fi
 
     if [ -n "$dur" ]; then
         LOG "Live capture on $iface (${dur}s) - A: pause/resume view, B: stop."
@@ -336,11 +359,20 @@ case "$__mode" in
         # call above.
         trap 'timeout 30 /root/scripts/sniff.sh --unbridge -y >/dev/null 2>&1' EXIT
         __dur=$(pick_duration) || exit 0
-        run_live_capture "br-sniff" "" "$__dur"
-        __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
-        LOG "$__out"
-        maybe_save_log "$__out"
-        ALERT "Capture complete - see log"
+        # BUG FOUND AND FIXED: this never checked whether run_live_capture
+        # actually got anywhere (see its own new liveness check) before
+        # unconditionally calling --summary on whatever CAPTURE_FILE ended
+        # up being (empty, if the launch failed) - the exact chain that
+        # produced both "not spamming with IPs" and the missing save-log
+        # prompt on the same live run (sniff.sh --summary "" used to fall
+        # through into an unrelated, non-interactive-hostile code path
+        # instead of erroring - see that file's own fix).
+        if run_live_capture "br-sniff" "" "$__dur"; then
+            __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
+            LOG "$__out"
+            maybe_save_log "$__out"
+            ALERT "Capture complete - see log"
+        fi
         ;;
 
     *)
@@ -356,10 +388,14 @@ case "$__mode" in
         fi
         __dur=$(pick_duration) || exit 0
         __filter=$(TEXT_PICKER "tcpdump filter (blank = everything)" "") || exit 0
-        run_live_capture "$__iface" "$__filter" "$__dur"
-        __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
-        LOG "$__out"
-        maybe_save_log "$__out"
-        ALERT "Capture complete - see log"
+        # BUG FOUND AND FIXED (same class as the Bridge/tap case above): the
+        # launch's own success was never checked before unconditionally
+        # calling --summary on whatever CAPTURE_FILE ended up being.
+        if run_live_capture "$__iface" "$__filter" "$__dur"; then
+            __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
+            LOG "$__out"
+            maybe_save_log "$__out"
+            ALERT "Capture complete - see log"
+        fi
         ;;
 esac
