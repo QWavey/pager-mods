@@ -242,7 +242,15 @@ deadnet_dir="$SCRIPT_DIR/lib/deadnet"
 # --sleep and --cidr were handed straight to deadnet.py's -s/-m with no
 # numeric check at all - a typo'd value would surface as a Python-level
 # error instead of this toolkit's usual clear, immediate reason.
-case "$SLEEP_TIME" in ''|*[!0-9.]*|.|*.*.*) die "'--sleep' needs a plain number of seconds (got '$SLEEP_TIME')." ;; esac
+#
+# BUG FOUND AND FIXED (found via code review, caught right after adding
+# the check above): deadnet.py's own argparser (scripts/lib/deadnet/utils/
+# argparser.py) declares -s/--sleep-interval as `type=int` - a decimal
+# like "5.5" would pass a bluetooth.sh-style "plain number" check but then
+# get REJECTED by argparse itself ("invalid int value"), the exact
+# confusing Python-level error this validation exists to prevent in the
+# first place. Whole numbers only, matching what -s actually accepts.
+case "$SLEEP_TIME" in ''|*[!0-9]*) die "'--sleep' needs a whole number of seconds (got '$SLEEP_TIME')." ;; esac
 case "$CIDR" in ''|*[!0-9]*) die "'--cidr' needs a whole number (got '$CIDR')." ;; esac
 [ "$CIDR" -ge 0 ] && [ "$CIDR" -le 32 ] || die "'--cidr' must be between 0 and 32 (got '$CIDR')."
 
