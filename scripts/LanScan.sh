@@ -140,13 +140,26 @@ esac
 
 [ -n "$EXTRA_ARGS" ] && NMAP_ARGS="$NMAP_ARGS $EXTRA_ARGS"
 
+# BIG CHANGE: full/vuln are the two modes this script already warns can run
+# long - but nmap's normal report output only prints as EACH HOST finishes,
+# so a slow scan against even one uncommon/filtered host looks completely
+# silent for however long that host takes. --stats-every makes nmap print
+# its own periodic "X.XX% done; ETC ..." progress line regardless of
+# per-host completion, so a long full/vuln scan actually shows it's alive
+# and roughly how much longer it needs, instead of leaving you guessing
+# whether it's working or has hung. Added here (before the args are
+# printed/used) so the summary below and the real invocation always agree.
+if [ "$MODE" = "full" ] || [ "$MODE" = "vuln" ]; then
+    NMAP_ARGS="$NMAP_ARGS --stats-every 15s"
+fi
+
 say "Interface:  $IFACE"
 say "Subnet:     $SUBNET"
 say "Mode:       $MODE  (nmap $NMAP_ARGS)"
 say "Output:     $OUTPUT"
 
 if [ "$MODE" = "full" ] || [ "$MODE" = "vuln" ]; then
-    say "Note: this mode can take a long time on a large subnet."
+    say "Note: this mode can take a long time on a large subnet - progress prints every 15s."
 fi
 
 confirm "Start scan?" || die "Aborted."

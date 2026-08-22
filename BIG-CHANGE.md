@@ -29,7 +29,7 @@ payloads/, then the two installer scripts.
 
 1. [x] scripts/lib/common.sh
 2. [x] scripts/lib/raw_deauth.py
-3. [ ] scripts/EvilTwin.sh
+3. [x] scripts/EvilTwin.sh
 4. [ ] scripts/LanScan.sh
 5. [ ] scripts/PayloadRunner.sh
 6. [ ] scripts/alert.sh

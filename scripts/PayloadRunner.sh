@@ -28,6 +28,8 @@
 #                                    (useful for headless runs - some payloads use
 #                                    WAIT_FOR_BUTTON_PRESS and need a person present)
 #   --background                     Launch and detach, logging to /root/loot/payload-runs/
+#   --status                          Is a backgrounded payload still running, and which one
+#   --stop                             Stop the currently backgrounded payload
 #   -y, --yes                        Don't prompt for confirmation
 #   -h, --help                        This help
 
@@ -41,7 +43,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() { print_help "$0"; exit 1; }
 
+# BIG CHANGE: every other long-running thing in this toolkit (deauth.sh,
+# sniff.sh, bluetooth.sh, ...) tracks its background PID and offers
+# --status/--stop - this script, the actual GENERIC payload launcher, had
+# neither. Backgrounding a payload here used to mean the PID printed once at
+# launch was the ONLY record of it - walk away, lose that terminal output,
+# and there was no way left to check whether it was still running or to
+# stop it without manually grepping `ps` for the process. Same PIDFILE +
+# pid_running() pattern (from common.sh) every other backgrounded thing
+# here already uses, so a backgrounded payload is finally a first-class,
+# manageable thing instead of a fire-and-forget PID you have to remember.
+PIDFILE="/tmp/pager-payloadrunner.pid"
+NAMEFILE="/tmp/pager-payloadrunner.name"
+is_running() { pid_running "$PIDFILE"; }
+
 DO_LIST=0
+DO_STATUS=0
+DO_STOP=0
 CATEGORY=""
 RUN_TARGET=""
 TIMEOUT=""
@@ -51,6 +69,8 @@ ASSUME_YES=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --list) DO_LIST=1; shift ;;
+        --status) DO_STATUS=1; shift ;;
+        --stop) DO_STOP=1; shift ;;
         --category) [ $# -lt 2 ] && die "--category needs a value"; CATEGORY="$2"; shift 2 ;;
         --run) [ $# -lt 2 ] && die "--run needs a value (CATEGORY/NAME)"; RUN_TARGET="$2"; shift 2 ;;
         --timeout) [ $# -lt 2 ] && die "--timeout needs a value"; TIMEOUT="$2"; shift 2 ;;
@@ -60,6 +80,26 @@ while [ $# -gt 0 ]; do
         *) err "Unknown argument: $1"; usage ;;
     esac
 done
+
+if [ "$DO_STATUS" = "1" ]; then
+    if is_running; then
+        say "Running (PID $(cat "$PIDFILE")): $(cat "$NAMEFILE" 2>/dev/null || echo "unknown payload")"
+    else
+        say "Not running."
+    fi
+    exit 0
+fi
+
+if [ "$DO_STOP" = "1" ]; then
+    if is_running; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        say "Stopped $(cat "$NAMEFILE" 2>/dev/null || echo "backgrounded payload") (PID $(cat "$PIDFILE"))."
+    else
+        say "Nothing running."
+    fi
+    rm -f "$PIDFILE" "$NAMEFILE"
+    exit 0
+fi
 
 payload_meta() {
     # payload_meta payload.sh field  -> prints "# Title: xyz" style header value
@@ -136,6 +176,12 @@ run_payload() {
     fi
 
     if [ "$BACKGROUND" = "1" ]; then
+        # BIG CHANGE (see PIDFILE/is_running above): only one backgrounded
+        # payload is tracked at a time - same single-instance convention
+        # deauth.sh/sniff.sh already use, refuse a second one rather than
+        # silently losing track of the first (its PIDFILE would just get
+        # overwritten, and --stop/--status would only ever see the newest).
+        is_running && die "A backgrounded payload is already running ($(cat "$NAMEFILE" 2>/dev/null), PID $(cat "$PIDFILE")). Use --stop first."
         say "Launching in background, logging to $logfile"
         # No `nohup` binary on this busybox build - ignore SIGHUP in a
         # subshell instead, which needs no external command at all.
@@ -152,7 +198,9 @@ run_payload() {
         # instead of reporting success on a process that's already gone.
         sleep 1
         if kill -0 "$bgpid" 2>/dev/null; then
-            say "Started (PID $bgpid)."
+            echo "$bgpid" > "$PIDFILE"
+            echo "${title:-$(basename "$dir")}" > "$NAMEFILE"
+            say "Started (PID $bgpid). Use --status/--stop to check on or end it."
         else
             err "Payload exited immediately - see $logfile for why (check for a bad --timeout value or an error in payload.sh)."
             return 1
