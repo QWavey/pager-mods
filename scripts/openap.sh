@@ -93,6 +93,13 @@ fi
 
 if [ "$DO_ON" = "1" ]; then
     [ -z "$SSID" ] && die "--name is required with --on."
+    # BUG FOUND AND FIXED (found via code review): --bssid had no format
+    # check before being handed to WIFI_OPEN_AP - the exact same gap
+    # already found and fixed for EvilTwin.sh's own --bssid (which wraps
+    # the same kind of call), missed here. A typo'd BSSID would only
+    # surface as a generic "Failed to set the Open AP" instead of a clear,
+    # immediate reason.
+    [ -n "$BSSID" ] && { is_valid_mac "$BSSID" || die "'$BSSID' doesn't look like a MAC address (expected aa:bb:cc:dd:ee:ff) - check for a typo."; }
     if [ "$INTERACTIVE" != "1" ] && [ "$ASSUME_YES" != "1" ]; then
         confirm "Enable the Open AP as '$SSID'?" || die "Aborted."
     fi
