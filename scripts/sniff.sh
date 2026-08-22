@@ -521,11 +521,27 @@ fi
 # BIG CHANGE (adopting common.sh's shared primitive): backed by the one
 # canonical pid_running() in lib/common.sh instead of another independent
 # copy of the same "PIDFILE + kill -0" check.
-# pid_running's optional NAME_PATTERN (see lib/common.sh) guards against a
-# stale PIDFILE whose PID got reused by an unrelated process - the
-# backgrounded capture is a subshell of THIS script, so its real
-# /proc/PID/cmdline still shows "sniff.sh".
-is_running() { pid_running "$PIDFILE" "sniff.sh"; }
+#
+# BUG FOUND AND FIXED (CRITICAL, self-introduced regression, live-caught):
+# this used "sniff.sh" as pid_running()'s NAME_PATTERN, copying the
+# pattern used for bluetooth.sh/crash_logger.sh/deauth.sh/tracer.sh/
+# usb_monitor.sh - but unlike ALL of those, sniff.sh's own run_capture_bg()
+# is a SPECIAL case (documented in its own header above): it `exec`s
+# straight into tcpdump/timeout, replacing the subshell's process image,
+# the exact same situation webui.sh's is_running() already correctly
+# handles by matching "server.py" instead of "webui.sh". Missing that same
+# reasoning here meant the real backgrounded process's /proc/PID/cmdline
+# NEVER contained "sniff.sh" at all (it shows "tcpdump ..." or
+# "timeout N tcpdump ..."), so is_running() always returned false for a
+# capture that was actually running fine - confirmed live: a real
+# --background capture wrote a genuine, real, non-empty .pcap file to
+# /root/loot/sniff/ while sniff.sh itself reported "Capture exited
+# immediately" and `--status` said "Not running" the whole time. This
+# broke EVERY background capture's liveness reporting (and by extension,
+# every payload/GUI action built on top of it) since that fix went out
+# earlier today. "tcpdump" is the correct pattern - present in the real
+# cmdline whether or not `timeout` wraps it.
+is_running() { pid_running "$PIDFILE" "tcpdump"; }
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
