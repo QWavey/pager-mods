@@ -951,6 +951,34 @@ if [ "$DO_BRIDGE" = "1" ]; then
     ip_link set "$BR_IFACE2" up
     ip_link set "$BRIDGE_NAME" up
 
+    # BUG FOUND AND FIXED (found via live testing - this is very likely
+    # why "the bridge worked but DHCP didn't" was reported even on a run
+    # where the Pager's OWN --dhcp lease succeeded end-to-end, confirmed
+    # via /tmp/pager-sniff-dhcp.log showing a clean discover/offer/lease
+    # sequence): the tethered PC's own NIC never sees any signal that its
+    # network changed - the USB-C cable stays physically plugged in the
+    # whole time, so its link light/carrier state never goes down, which
+    # is specifically the event most OS DHCP clients wait for before
+    # proactively renewing. Without that signal, the PC just keeps
+    # sitting on its OLD lease (from the Pager's own isolated management
+    # subnet) indefinitely - looking exactly like "no internet" even
+    # though the bridge and the Pager's own DHCP lease are both genuinely
+    # working. Deliberately flapping eth0 (always the USB-C/PC-facing
+    # port on this hardware, per this file's own documented topology -
+    # hardcoded by name rather than $BR_IFACE1, so this still targets the
+    # right side even if --bridge is ever called with the args reversed)
+    # mimics a real unplug/replug at the driver level, which is exactly
+    # the signal most OSes (confirmed effective for the reporter's own
+    # Windows machine) use to trigger an immediate DHCP renewal on their
+    # end too - no manual ipconfig/release-renew (or non-Windows
+    # equivalent) needed on the client side anymore.
+    if [ "$BR_IFACE1" = "eth0" ] || [ "$BR_IFACE2" = "eth0" ]; then
+        say "Briefly cycling eth0's link state so the tethered PC notices the network changed and renews its own IP automatically..."
+        ip_link set eth0 down 2>/dev/null
+        sleep 1
+        ip_link set eth0 up 2>/dev/null
+    fi
+
     trap - EXIT
 
     say "Bridge $BRIDGE_NAME is up ($BR_IFACE1 <-> $BR_IFACE2)."
