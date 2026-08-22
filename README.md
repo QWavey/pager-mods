@@ -99,5 +99,10 @@ ceiling itself.
 - `scripts/guiserver/` - optional local web control panel, gated by
   `ALLOWED_SCRIPTS` in `server.py`. Deliberately not the main focus of
   this project - most work happens over SSH/CLI and payloads.
-- `deadnet.sh` / `deadnet_lan_kill` are intentionally excluded from
-  ongoing improve/bug-hunt passes - considered good enough as-is.
+- `deadnet.sh` / `deadnet_lan_kill` were excluded from ongoing improve/
+  bug-hunt passes for most of this project's history ("considered good
+  enough as-is") until explicitly brought back in-scope and hardened to
+  match the rest of the toolkit's conventions (real `--background` +
+  PIDFILE tracking, single-instance protection, input validation). Pre-
+  improvement versions are kept at `backups/Deadnet_lan_old.sh` and
+  `backups/deadnet_lan_kill_payload_old.sh` for reference.

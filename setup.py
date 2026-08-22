@@ -229,7 +229,7 @@ PAYLOAD_META = {
     "wifi_deauth": {"title": "WiFi Deauth", "author": "florian",
         "description": "Continuously deauth a network's clients until you press B. Same-name networks (mesh APs) are grouped - pick once to hit all of them. Dual-radio removed (caused repeated hard hangs needing a manual power cycle). Chase mode: a specific target roams a mesh, this follows it. Dynamic escalation: the default 'everyone' broadcast attack now periodically re-checks each AP for still-active clients and escalates burst pressure specifically where it's measurably not working yet - whole-range disruption, not one device.", "version": "9.0"},
     "deadnet_lan_kill": {"title": "DeadNet LAN Kill", "author": "florian",
-        "description": "Discovers live LAN hosts, then ARP-poisons the whole wired LAN (eth1) to disconnect them. Press B to stop.", "version": "3.0"},
+        "description": "Discovers live LAN hosts, then ARP-poisons the whole wired LAN (eth1) to disconnect them. Real --background support with a liveness check (deadnet.sh previously had none despite claiming it did). Press B to stop.", "version": "4.0"},
     "bluetooth_jam": {"title": "Bluetooth Jam", "author": "florian",
         "description": "Scan (classic+BLE), L2CAP-flood one target, jam the whole area, flood BLE adverts, or occupy the 2.4GHz band (full sweep or BLE-advertising-channel focus). Press B to stop.", "version": "4.1"},
     "pc_link_recon": {"title": "PC Link Capture", "author": "florian",
