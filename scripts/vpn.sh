@@ -69,16 +69,89 @@ run_wireguard() {
 # process check (ps), Wireguard via 'wg show' (the standard wireguard-
 # tools command) if installed - neither guessed at unconfirmed platform
 # internals.
+# IMPROVEMENT (new feature - connection duration in --status, exactly the
+# kind of thing this file's own header comment on do_status names as the
+# one question "actually up" alone doesn't answer): knowing a VPN process
+# is alive doesn't say whether it's a fresh connection or one that's been
+# stable for days - genuinely useful at a glance, and the two helpers below
+# only ever read already-relied-upon procfs/wg-tools state, no new
+# dependency or guesswork beyond what do_status already does.
+#
+# fmt_duration SECONDS - compact "3d 4h" / "2h 15m" / "45m 12s" / "9s"
+# elapsed-time formatting, shared by both checks below.
+fmt_duration() {
+    local s="${1:-0}" d h m sec
+    case "$s" in ''|*[!0-9]*) echo "?"; return 1 ;; esac
+    d=$((s / 86400)); h=$(((s % 86400) / 3600)); m=$(((s % 3600) / 60)); sec=$((s % 60))
+    if [ "$d" -gt 0 ]; then echo "${d}d ${h}h"
+    elif [ "$h" -gt 0 ]; then echo "${h}h ${m}m"
+    elif [ "$m" -gt 0 ]; then echo "${m}m ${sec}s"
+    else echo "${sec}s"
+    fi
+}
+
+# openvpn_uptime PID - best-effort process uptime via /proc/PID/stat's
+# starttime field (in clock ticks since boot) and /proc/uptime - both
+# already relied on elsewhere in this toolkit (pid_running() in
+# lib/common.sh reads /proc/$pid/cmdline; several incident comments in that
+# same file assume procfs is present), not a new dependency. Splits on the
+# LAST ") " rather than a fixed field index, since /proc/PID/stat's own
+# "(comm)" field can itself contain spaces or parentheses - a fixed-index
+# split would silently misalign every field after it for such a process
+# name. Not confirmed live against this exact firmware's clock-tick
+# resolution; if the number looks wrong, cross-check with 'ps w' by hand.
+openvpn_uptime() {
+    local pid="$1" stat rest starttime hz now_uptime
+    [ -r "/proc/$pid/stat" ] && [ -r /proc/uptime ] || return 1
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    rest="${stat##*) }"
+    starttime=$(echo "$rest" | awk '{print $20}')
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    hz=$(getconf CLK_TCK 2>/dev/null)
+    case "$hz" in ''|*[!0-9]*) hz=100 ;; esac
+    now_uptime=$(awk '{print $1}' /proc/uptime 2>/dev/null)
+    case "$now_uptime" in ''|*[!0-9.]*) return 1 ;; esac
+    awk -v u="$now_uptime" -v st="$starttime" -v hz="$hz" \
+        'BEGIN{v=u-(st/hz); if (v<0) v=0; printf "%d", v}'
+}
+
+# wg_handshakes - Wireguard has no single "interface up since" figure the
+# way a plain process does, so this reports the standard proxy: how long
+# ago each peer's last handshake was, straight from 'wg show ... latest-
+# handshakes' (the documented wireguard-tools command for exactly this,
+# already gated behind the same `command -v wg` check do_status uses).
+# A peer that has never handshaked reports timestamp 0, called out
+# explicitly rather than printed as a nonsensical multi-decade duration.
+wg_handshakes() {
+    local now line iface peer ts ago
+    now=$(date +%s 2>/dev/null) || return 1
+    wg show all latest-handshakes 2>/dev/null | while read -r iface peer ts; do
+        [ -n "$iface" ] || continue
+        if [ "${ts:-0}" = "0" ]; then
+            say "  $iface peer ${peer:0:12}...: no handshake yet"
+        else
+            ago=$((now - ts))
+            say "  $iface peer ${peer:0:12}...: last handshake $(fmt_duration "$ago") ago"
+        fi
+    done
+}
+
 do_status() {
     say "VPN status (best-effort):"
     if ps w 2>/dev/null | grep -q '[o]penvpn'; then
         say "OpenVPN: a live 'openvpn' process was found - looks up."
+        ovpn_pid=$(ps w 2>/dev/null | awk '/[o]penvpn/ {print $1; exit}')
+        if [ -n "${ovpn_pid:-}" ]; then
+            ovpn_up=$(openvpn_uptime "$ovpn_pid" 2>/dev/null)
+            [ -n "$ovpn_up" ] && say "  process uptime: $(fmt_duration "$ovpn_up") (PID $ovpn_pid)"
+        fi
     else
         say "OpenVPN: no live 'openvpn' process found - looks down (or was never enabled)."
     fi
     if command -v wg >/dev/null 2>&1; then
         if wg show 2>/dev/null | grep -q .; then
             say "Wireguard: 'wg show' reports an active interface - looks up."
+            wg_handshakes
         else
             say "Wireguard: 'wg show' reports nothing active - looks down."
         fi

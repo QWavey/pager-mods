@@ -42,6 +42,7 @@
 #   reset.sh --processes [-y]                     stop any running toolkit captures/attacks
 #   reset.sh --fast-restart [-y]                    restart just the pineapple app (fast)
 #   reset.sh --reboot [-y]                             full system reboot (slow)
+#   reset.sh --dry-run                                    preview what --all would do, change nothing
 #
 # Options:
 #   --network        Tear down the br-sniff bridge if present, then reload
@@ -82,6 +83,13 @@
 #                                        clean slate (e.g. after something
 #                                        deeper than this script's other
 #                                        options can reach).
+#   --dry-run                          Print exactly what the selected flags
+#                                         would do and exit - no confirmation
+#                                         prompt, no commands actually run,
+#                                         nothing on the device touched.
+#                                         Combine with --network/--wifi/etc.
+#                                         to preview a specific subset, or use
+#                                         alone to preview the full --all run.
 #   -y, --yes                        Skip the confirmation prompt.
 #   -h, --help                          This help.
 
@@ -92,7 +100,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 usage() { print_help "$0"; exit 1; }
 
 DO_NETWORK=0; DO_WIFI=0; DO_BLUETOOTH=0; DO_PROCESSES=0; DO_ALL=0
-DO_FAST_RESTART=0; DO_REBOOT=0
+DO_FAST_RESTART=0; DO_REBOOT=0; DO_DRY_RUN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -103,6 +111,7 @@ while [ $# -gt 0 ]; do
         --all) DO_ALL=1; shift ;;
         --fast-restart) DO_FAST_RESTART=1; shift ;;
         --reboot) DO_REBOOT=1; shift ;;
+        --dry-run) DO_DRY_RUN=1; shift ;;
         -y|--yes) ASSUME_YES=1; shift ;;
         -h|--help) usage ;;
         *) err "Unknown argument: $1"; usage ;;
@@ -114,6 +123,10 @@ done
 # exit immediately, same convention as --stop/--status in this toolkit's
 # other scripts.
 if [ "$DO_FAST_RESTART" = "1" ]; then
+    if [ "$DO_DRY_RUN" = "1" ]; then
+        say "[DRY RUN] Would find the running /pineapple/pineapple process and kill it (procd respawns it cleanly) - nothing done, no confirmation asked."
+        exit 0
+    fi
     if [ "$ASSUME_YES" != "1" ]; then
         confirm "Restart the pineapple app process? procd respawns it cleanly (this is exactly what setup.py itself does after deploying changed payloads) - brief interruption to the on-screen UI/payload list, no full reboot." || die "Aborted."
     fi
@@ -134,6 +147,10 @@ if [ "$DO_FAST_RESTART" = "1" ]; then
 fi
 
 if [ "$DO_REBOOT" = "1" ]; then
+    if [ "$DO_DRY_RUN" = "1" ]; then
+        say "[DRY RUN] Would run \`reboot\` - full system reboot, drops SSH/the physical UI until the device fully comes back up. Nothing done, no confirmation asked."
+        exit 0
+    fi
     if [ "$ASSUME_YES" != "1" ]; then
         confirm "Full system reboot? Slower than a fast restart and drops SSH/the physical UI until the device fully comes back up - use this when more than just the pineapple app needs a clean slate." || die "Aborted."
     fi
@@ -438,6 +455,22 @@ say "This will:"
 [ "$DO_PROCESSES" = "1" ] && say "  - Stop any running deauth/bluetooth/sniff/tracer/EvilTwin/deadnet/wigle captures or attacks"
 [ "$DO_WIFI" = "1" ] && say "  - Reset the WiFi channel lock so recon resumes normal hopping"
 [ "$DO_BLUETOOTH" = "1" ] && say "  - Reset the Bluetooth radio (end Direct Test Mode / adv-spam)"
+
+# IMPROVEMENT (new feature, genuinely useful for a toolkit whose whole
+# purpose is SSH/network recovery): --dry-run stops right here, after the
+# "This will:" list above (which already accurately describes exactly what
+# each selected flag does, including the "may briefly interrupt SSH"
+# caveat) but before the confirmation prompt and before any of the
+# reset_*() functions run. Deliberately reuses those same descriptions
+# instead of maintaining a second, separate summary of what each action
+# does - two descriptions of the same behavior is exactly the kind of
+# duplication this toolkit's own comments elsewhere warn drifts out of
+# sync. No confirmation is asked here either - a dry run makes no changes,
+# so there's nothing to confirm.
+if [ "$DO_DRY_RUN" = "1" ]; then
+    say "Dry run - nothing above was actually done. Re-run without --dry-run (add -y to skip the confirmation prompt too) to actually apply it."
+    exit 0
+fi
 
 if [ "$ASSUME_YES" != "1" ]; then
     confirm "Proceed?" || die "Aborted."

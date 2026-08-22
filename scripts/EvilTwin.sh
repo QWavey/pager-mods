@@ -118,6 +118,29 @@ show_status() {
     echo "-- radio0 (2.4GHz) interfaces --"
     iw dev 2>/dev/null | awk '/phy#/{p=$0} /Interface/{print p" "$0}'
     echo
+    # IMPROVEMENT (round 1 - genuine feature, not a bug fix): --status used
+    # to show only interface/uplink plumbing, never whether a clone AP is
+    # actually configured/running or what it's actually broadcasting - the
+    # exact gap a user hits after "EvilTwin.sh --stop" or a reboot, when
+    # they need to know "is anything still live?" without re-running the
+    # whole interactive flow. Same uci fields (ssid/disabled) openap.sh's
+    # own --status and wifi.sh's is_iface_enabled()/show_status() already
+    # read for the identical purpose on wlan0open/wlan0wpa/wlan0mgmt - no
+    # new/unverified uci keys introduced here, only the already-confirmed
+    # ones reused for the two interfaces EvilTwin.sh itself configures.
+    echo "-- Clone AP configuration --"
+    for pair in "wlan0wpa:WPA (password-protected) clone" "wlan0open:Open clone"; do
+        iface="${pair%%:*}"; label="${pair#*:}"
+        ssid=$(uci -q get "wireless.$iface.ssid" 2>/dev/null)
+        if [ -n "$ssid" ]; then
+            disabled=$(uci -q get "wireless.$iface.disabled" 2>/dev/null)
+            state="ON"; [ "$disabled" = "1" ] && state="off"
+            echo "  $label ($iface): $state - SSID: $ssid"
+        else
+            echo "  $label ($iface): not configured"
+        fi
+    done
+    echo
     echo "-- Ethernet uplink (eth1) --"
     # BUG FOUND AND FIXED (found via code review - same class as reset.sh's
     # earlier fix, but worse here: this wasn't even wrapped in `timeout` at
@@ -132,6 +155,25 @@ show_status() {
     echo
     echo "-- WiFi client uplink (wlan0cli) --"
     ip -4 addr show wlan0cli 2>/dev/null || echo "  not configured"
+    echo
+    # IMPROVEMENT (round 1, continued): last-saved settings are what --on
+    # will actually restore, but were previously invisible until you ran
+    # --on (or interactively) and saw the offered defaults. Surfacing them
+    # in --status lets a user check "what would --on bring back?" without
+    # side effects. Explicitly labeled as saved config, not live state -
+    # these values come from cfg_get (PAYLOAD_GET_CONFIG), the same store
+    # --on itself reads, not from re-querying the device.
+    echo "-- Last saved settings (used by 'EvilTwin.sh --on') --"
+    last_ssid_disp=$(cfg_get last_cloned)
+    if [ -n "$last_ssid_disp" ]; then
+        last_mimic_disp=$(cfg_get last_mimic); [ "$last_mimic_disp" = "1" ] && last_mimic_disp="yes" || last_mimic_disp="no"
+        last_record_disp=$(cfg_get last_record); [ "$last_record_disp" = "1" ] && last_record_disp="yes" || last_record_disp="no"
+        last_scope_disp=$(cfg_get last_scope_filter); [ "$last_scope_disp" = "1" ] && last_scope_disp="yes" || last_scope_disp="no"
+        last_uplink_disp=$(cfg_get last_uplink_mode); [ -z "$last_uplink_disp" ] && last_uplink_disp="auto"
+        echo "  SSID: $last_ssid_disp | uplink: $last_uplink_disp | mimic: $last_mimic_disp | record: $last_record_disp | scope-filter: $last_scope_disp"
+    else
+        echo "  none yet - run EvilTwin.sh --cloned \"SSID\" (or interactively) first"
+    fi
 }
 
 if [ "$DO_STATUS" = "1" ]; then

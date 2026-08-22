@@ -38,14 +38,10 @@ usage() { print_help "$0"; exit 1; }
 # confirm() gate added below (in run_filter's "clear" case), and the same
 # -y/--yes filtered OUT of "$@" entirely (not just detected) so it can
 # never accidentally land as a positional TYPE/ACTION/list-name argument.
-_filtered_args=()
-for _arg in "$@"; do
-    case "$_arg" in
-        -y|--yes) ASSUME_YES=1 ;;
-        *) _filtered_args+=("$_arg") ;;
-    esac
-done
-set -- "${_filtered_args[@]}"
+# IMPROVEMENT (DRY): this scan used to be a locally hand-maintained copy;
+# now shared via lib/common.sh's filter_yes_args() - see its comment there.
+filter_yes_args "$@"
+set -- "${FILTERED_ARGS[@]}"
 
 TYPE="${1:-}"
 ACTION="${2:-}"

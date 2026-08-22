@@ -27,14 +27,10 @@ usage() { print_help "$0"; exit 1; }
 # (not just detected) so it can never accidentally become a literal SSID
 # argument to add/delete (which take a variable-length "$@" of their own
 # and never needed -y to begin with).
-_filtered_args=()
-for _arg in "$@"; do
-    case "$_arg" in
-        -y|--yes) ASSUME_YES=1 ;;
-        *) _filtered_args+=("$_arg") ;;
-    esac
-done
-set -- "${_filtered_args[@]}"
+# IMPROVEMENT (DRY): this scan used to be a locally hand-maintained copy;
+# now shared via lib/common.sh's filter_yes_args() - see its comment there.
+filter_yes_args "$@"
+set -- "${FILTERED_ARGS[@]}"
 
 # BUG FOUND AND FIXED (found via code review, same class already fixed in
 # dns.sh/dnsspoof.sh/gps.sh/mgmt.sh/openap.sh/pcap.sh/reconsession.sh):

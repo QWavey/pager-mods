@@ -29,14 +29,10 @@ usage() { print_help "$0"; exit 1; }
 # being gated behind confirm() - could never be scripted. Filtered OUT of
 # "$@" entirely (not just detected) so it can never accidentally land as a
 # positional HOST/PORT/... argument to --setup/--add-port/--known-host.
-_filtered_args=()
-for _arg in "$@"; do
-    case "$_arg" in
-        -y|--yes) ASSUME_YES=1 ;;
-        *) _filtered_args+=("$_arg") ;;
-    esac
-done
-set -- "${_filtered_args[@]}"
+# IMPROVEMENT (DRY): this scan used to be a locally hand-maintained copy;
+# now shared via lib/common.sh's filter_yes_args() - see its comment there.
+filter_yes_args "$@"
+set -- "${FILTERED_ARGS[@]}"
 
 # BUG FOUND AND FIXED (found via code review - the most complete instance
 # of the "silent on failure" class already fixed throughout this

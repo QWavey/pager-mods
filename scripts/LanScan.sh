@@ -11,6 +11,7 @@
 # Usage:
 #   LanScan.sh                                interactive mode
 #   LanScan.sh --mode quick [options]
+#   LanScan.sh --list
 #
 # Options:
 #   --iface IFACE          Interface to scan from (default: eth1)
@@ -19,6 +20,7 @@
 #   --ports SPEC             Port spec for --mode custom, e.g. 22,80,443 or 1-1000
 #   --extra-args "ARGS"       Extra raw nmap arguments (advanced)
 #   --output FILE             Save results to a specific file (default: timestamped under /root/loot/lanscan/)
+#   --list                     List past scans in /root/loot/lanscan/ (newest first) and exit - no scan run
 #   -y, --yes                 Don't prompt for confirmation
 #   -h, --help                 This help
 #
@@ -46,6 +48,7 @@ PORTS=""
 EXTRA_ARGS=""
 OUTPUT=""
 ASSUME_YES=0
+LIST_ONLY=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,11 +58,45 @@ while [ $# -gt 0 ]; do
         --ports) [ $# -lt 2 ] && die "--ports needs a value"; PORTS="$2"; shift 2 ;;
         --extra-args) [ $# -lt 2 ] && die "--extra-args needs a value"; EXTRA_ARGS="$2"; shift 2 ;;
         --output) [ $# -lt 2 ] && die "--output needs a value"; OUTPUT="$2"; shift 2 ;;
+        --list) LIST_ONLY=1; shift ;;
         -y|--yes) ASSUME_YES=1; shift ;;
         -h|--help) usage ;;
         *) err "Unknown argument: $1"; usage ;;
     esac
 done
+
+# IMPROVEMENT (new feature): --list - browse past scan results without
+# spending time re-scanning or needing nmap/an interface present at all.
+# Before this, the only way to see what LanScan.sh had already captured was
+# report.sh's aggregate report (every other loot category too, and only
+# ever the single most-recent scan in detail) or manually `ls`-ing
+# /root/loot/lanscan/ and grepping each file by hand. Exits before the
+# nmap/interface checks below - those are scan-only requirements this
+# read-only path has no need of.
+if [ "$LIST_ONLY" = "1" ]; then
+    if [ ! -d "$LOOT_DIR" ]; then
+        say "No scans yet - $LOOT_DIR doesn't exist."
+        exit 0
+    fi
+    FILES=$(ls -t "$LOOT_DIR" 2>/dev/null | grep -v '\.incomplete$')
+    if [ -z "$FILES" ]; then
+        say "No completed scans in $LOOT_DIR yet."
+        exit 0
+    fi
+    TOTAL=$(printf '%s\n' "$FILES" | wc -l | tr -d ' ')
+    say "Past scans in $LOOT_DIR (newest first, showing up to 20 of $TOTAL):"
+    SHOWN=0
+    printf '%s\n' "$FILES" | while IFS= read -r f; do
+        SHOWN=$((SHOWN + 1))
+        [ "$SHOWN" -gt 20 ] && break
+        path="$LOOT_DIR/$f"
+        hosts=$(grep -c "^Nmap scan report for" "$path" 2>/dev/null)
+        hosts="${hosts:-0}"
+        mtime=$(date -r "$path" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "?")
+        printf '  %-45s %s  hosts: %s\n' "$f" "$mtime" "$hosts"
+    done
+    exit 0
+fi
 
 INTERACTIVE=0
 [ -z "$MODE" ] && INTERACTIVE=1

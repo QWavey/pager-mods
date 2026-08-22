@@ -103,6 +103,17 @@ input[type="text"], input[type="password"], select {
 }
 .btn:hover { filter: brightness(1.15); }
 .btn:active { transform: translateY(1px); }
+/* IMPROVEMENT (UX): every button already gets b.disabled = true for the
+   duration of its in-flight request (see app.js's onClick()), specifically
+   so a double-click/double-tap can't fire two overlapping requests for the
+   same output box. But .btn/.btn-good/.btn-danger all set an explicit
+   background/border color, which overrides the browser's own default
+   "disabled" dimming - so that guard was invisible: a disabled button here
+   looked completely identical to a clickable one until the response came
+   back. Dimming + a not-allowed cursor makes the already-working guard
+   actually visible while a command is running. */
+.btn:disabled { opacity: .5; cursor: not-allowed; filter: none; }
+.btn:disabled:hover { filter: none; }
 
 .btn-good { background: var(--good); color: #08130d; border-color: var(--good); }
 .btn-danger { background: var(--danger); color: #1a0505; border-color: var(--danger); }

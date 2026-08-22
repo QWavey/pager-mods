@@ -398,9 +398,19 @@
     if (ctx.abort) { out.textContent = ctx.abort; return; }
     if (spec.confirm && !confirmAuthorized(spec.confirm(ctx))) return;
     if (spec.tailOff) stopTailing(spec.tailOff);
-    if (spec.starting !== undefined) {
-      out.textContent = typeof spec.starting === "function" ? spec.starting(ctx) : spec.starting;
-    }
+    // IMPROVEMENT (UX): only about half of ACTIONS bothered to set a
+    // `starting` message - the rest (mimicOn/Off, mgmtOn/Off, openOn/Off,
+    // hopPause/Resume, reconNew, sniffAdapters/Status, pcLinkDetect,
+    // btStop/Status, ...) left the output box showing whatever it already
+    // had (often nothing) for the entire request - up to this action's own
+    // timeout, as long as 20s - with zero indication anything was even
+    // happening beyond the now-visibly-dimmed disabled button above. Every
+    // action already goes through this one executor, so a plain fallback
+    // here covers all of them at once instead of hand-adding `starting:
+    // "Running..."` to a dozen individual ACTIONS entries one by one.
+    out.textContent = spec.starting !== undefined
+      ? (typeof spec.starting === "function" ? spec.starting(ctx) : spec.starting)
+      : "Running...";
     const args = ctx.args || spec.args || [];
     const timeout = ctx.timeout || spec.timeout || 60;
     const background = ctx.background ?? spec.background ?? false;

@@ -301,11 +301,26 @@ run_monitor() {
         # (WiFi adapters, storage, anything), not just ones that show up
         # as an Ethernet interface. See get_internal_radio_usb_path above
         # for why the internal radio's own path is excluded.
-        local dmesg_total
-        dmesg_total=$(dmesg 2>/dev/null | wc -l)
+        #
+        # IMPROVEMENT (performance, run continuously every 2s): this used
+        # to call the `dmesg` binary TWICE per iteration whenever new lines
+        # showed up - once just to get the line count (`wc -l`), then again
+        # moments later to actually read the new lines (`tail`). dmesg on
+        # this device reads straight from the kernel ring buffer - a fork+
+        # exec+kernel-read that's pure waste to pay twice for the same
+        # snapshot when it's trivial to capture the buffer ONCE into a
+        # variable and derive both the count and the tail from that same
+        # string. Verified equivalent with a standalone repro (fake dmesg()
+        # with a call counter): identical output, dmesg invocations per
+        # "new lines" iteration dropped from 2 to 1. The no-change path
+        # (the common case, most iterations) was already just 1 call and
+        # stays that way.
+        local dmesg_now dmesg_total
+        dmesg_now=$(dmesg 2>/dev/null)
+        dmesg_total=$(printf '%s\n' "$dmesg_now" | wc -l)
         local _usb_grep='^\[.*\] usb [0-9]+-[0-9.]+: (new .* USB device|USB disconnect)'
         if [ "$dmesg_total" -gt "$dmesg_seen" ] 2>/dev/null; then
-            dmesg 2>/dev/null | tail -n "+$((dmesg_seen + 1))" | grep -E "$_usb_grep" | process_usb_dmesg_lines
+            printf '%s\n' "$dmesg_now" | tail -n "+$((dmesg_seen + 1))" | grep -E "$_usb_grep" | process_usb_dmesg_lines
             dmesg_seen="$dmesg_total"
         elif [ "$dmesg_total" -lt "$dmesg_seen" ] 2>/dev/null; then
             # BUG FOUND AND FIXED (same class as crash_logger.sh's own
@@ -328,7 +343,7 @@ run_monitor() {
             # worst this re-notifies about a device event from just
             # before the wrap once, which is a far better failure mode
             # than going silent for the rest of the run.
-            dmesg 2>/dev/null | grep -E "$_usb_grep" | process_usb_dmesg_lines
+            printf '%s\n' "$dmesg_now" | grep -E "$_usb_grep" | process_usb_dmesg_lines
             dmesg_seen="$dmesg_total"
         fi
 

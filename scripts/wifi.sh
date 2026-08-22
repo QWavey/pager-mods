@@ -147,29 +147,30 @@ if [ "$DO_OFF" = "1" ]; then
     # both inline and in the final summary.
     KILL_FAILURES=0
 
-    if is_iface_enabled "wlan0mgmt"; then
-        say "Disabling Management AP..."
-        WIFI_MGMT_AP_DISABLE wlan0mgmt || { err "Failed to disable the Management AP - it may still be broadcasting."; KILL_FAILURES=$((KILL_FAILURES + 1)); }
-        cfg_set was_mgmt_on 1
-    else
-        cfg_set was_mgmt_on 0
-    fi
+    # IMPROVEMENT (round 2 - DRY): these three blocks (mgmt/open/wpa) used
+    # to be hand-repeated copies of the identical enable-check/disable/
+    # cfg_set pattern, differing only in the interface name, disable
+    # command, and cfg key - exactly the kind of triplication this
+    # codebase's own history (see filters.sh's header) warns can let a fix
+    # land in one copy and get silently forgotten in the others. Collapsed
+    # into one loop; behavior, messages, and cfg keys are unchanged - only
+    # traced/verified via a standalone repro, not touched at the command
+    # level.
+    for entry in "wlan0mgmt:Management AP:WIFI_MGMT_AP_DISABLE:was_mgmt_on" \
+                 "wlan0open:Open AP:WIFI_OPEN_AP_DISABLE:was_open_on" \
+                 "wlan0wpa:WPA AP:WIFI_WPA_AP_DISABLE:was_wpa_on"; do
+        iface="${entry%%:*}"; rest="${entry#*:}"
+        label="${rest%%:*}"; rest="${rest#*:}"
+        disable_cmd="${rest%%:*}"; cfg_key="${rest#*:}"
 
-    if is_iface_enabled "wlan0open"; then
-        say "Disabling Open AP..."
-        WIFI_OPEN_AP_DISABLE wlan0open || { err "Failed to disable the Open AP - it may still be broadcasting."; KILL_FAILURES=$((KILL_FAILURES + 1)); }
-        cfg_set was_open_on 1
-    else
-        cfg_set was_open_on 0
-    fi
-
-    if is_iface_enabled "wlan0wpa"; then
-        say "Disabling WPA AP..."
-        WIFI_WPA_AP_DISABLE wlan0wpa || { err "Failed to disable the WPA AP - it may still be broadcasting."; KILL_FAILURES=$((KILL_FAILURES + 1)); }
-        cfg_set was_wpa_on 1
-    else
-        cfg_set was_wpa_on 0
-    fi
+        if is_iface_enabled "$iface"; then
+            say "Disabling $label..."
+            "$disable_cmd" "$iface" || { err "Failed to disable the $label - it may still be broadcasting."; KILL_FAILURES=$((KILL_FAILURES + 1)); }
+            cfg_set "$cfg_key" 1
+        else
+            cfg_set "$cfg_key" 0
+        fi
+    done
 
     # Same is_wifi_connected fix as show_status() above - is_iface_enabled
     # checks the wrong signal for the client interface, which could make

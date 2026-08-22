@@ -9,9 +9,23 @@
 # sourcing. Provides: say/err/die, cfg_get/cfg_set/cfg_del (wrapping the
 # official PAYLOAD_*_CONFIG store), confirm/ask prompts, need_arg for
 # set -u-safe argument parsing, and print_help (reads the CALLER script's
-# own leading comment header between the "Usage:" marker and the first
-# blank line after it, so each script's own file is the single source of
-# truth for its --help text - no more hand-counted sed ranges going stale).
+# own leading comment header - everything from right after the "#!" line
+# through the first truly blank line, which in practice covers the whole
+# header including its "Usage:" section since none of these scripts put a
+# blank line inside their own header - so each script's own file is the
+# single source of truth for its --help text - no more hand-counted sed
+# ranges going stale).
+#
+# IMPROVEMENT (doc accuracy, round 2 of this pass): the description above
+# used to say print_help reads "between the 'Usage:' marker and the first
+# blank line after it", implying it looks for that marker - it doesn't;
+# see print_help()'s own comment below for what it actually does. Verified
+# live (`reset.sh --help`) that output starts from the very first comment
+# line after the shebang (the "Put the device back..." summary), not from
+# "Usage:" - the old wording would mislead anyone relying on it while
+# writing a new script's header (e.g. assuming a blank line before their
+# own "Usage:" section is harmless, when it would truncate --help output
+# right there instead).
 
 # BUG FOUND AND FIXED (root-caused live via a real, reproducible device
 # failure - the same "ERROR: Interface 'eth0' does not exist" reported
@@ -50,6 +64,29 @@ cfg_set() { PAYLOAD_SET_CONFIG "$CFG_NS" "$1" "$2" >/dev/null 2>&1; }
 cfg_del() { PAYLOAD_DEL_CONFIG "$CFG_NS" "$1" >/dev/null 2>&1; }
 
 ASSUME_YES="${ASSUME_YES:-0}"
+
+# IMPROVEMENT (DRY): dnsspoof.sh, autossh.sh, ssidpool.sh, and filters.sh
+# each carried their own byte-for-byte copy of a "-y/--yes" pre-scan - loop
+# over "$@", set ASSUME_YES=1 on -y/--yes, filter it OUT of the positional
+# args entirely (so it can never land as a literal HOST/SSID/MAC/list-name
+# argument to add/delete/etc), rebuild "$@" from the survivors. Four
+# hand-maintained copies of the same ~10-line block meant a future fix or
+# tweak (e.g. supporting "=" syntax, or adding another bypass alias) would
+# need to be applied in four places and could easily land in three of them.
+# Callers now just do:
+#   filter_yes_args "$@"; set -- "${FILTERED_ARGS[@]}"
+# FILTERED_ARGS is a plain global array (no local/nameref trick) since these
+# are single-purpose top-level scripts, not a library used reentrantly.
+filter_yes_args() {
+    FILTERED_ARGS=()
+    local _arg
+    for _arg in "$@"; do
+        case "$_arg" in
+            -y|--yes) ASSUME_YES=1 ;;
+            *) FILTERED_ARGS+=("$_arg") ;;
+        esac
+    done
+}
 
 confirm() {
     [ "$ASSUME_YES" = "1" ] && return 0

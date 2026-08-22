@@ -37,11 +37,26 @@ done
 # no indication the flag was ignored. Fail loudly instead.
 [ "$DO_ARCHIVE" = "1" ] && [ "$DO_SAVE" != "1" ] && die "--archive requires --save (e.g. report.sh --save --archive)."
 
-count_files() {
+# IMPROVEMENT (DRY): count_files/count_matching/count_files_excluding were
+# three separate bodies that each independently repeated the exact same
+# "dir doesn't exist -> 0, else find | wc -l | trim the count" skeleton -
+# differing only in which find predicates they passed. Three copies of that
+# skeleton meant a future fix to it (say, wc -l's leading-space handling,
+# or the 2>/dev/null suppression) would need to be applied three times and
+# could easily drift, the same "duplicated safety-critical pattern" class
+# lib/common.sh's own header calls out for ip_link()/pid_running(). Pulled
+# into one internal helper; call sites below are untouched (same names,
+# same arguments, same output) so this is a pure refactor, not a behavior
+# change - verified with a standalone repro against sample loot
+# directories (recursive vs -maxdepth 1, name/! -name, missing dirs).
+_count_find() {
     local dir="$1"
+    shift
     [ -d "$dir" ] || { echo 0; return; }
-    find "$dir" -type f 2>/dev/null | wc -l | tr -d ' '
+    find "$dir" "$@" 2>/dev/null | wc -l | tr -d ' '
 }
+
+count_files() { _count_find "$1" -type f; }
 
 # count_matching / count_files_excluding DIR PATTERN - used to separate
 # pc_link.sh's captures from generic sniff.sh ones. Both actually land in
@@ -50,16 +65,8 @@ count_files() {
 # its files "pclink-*" specifically so they're distinguishable here
 # instead of just disappearing into (or double-counting against) the
 # generic sniff total.
-count_matching() {
-    local dir="$1" pattern="$2"
-    [ -d "$dir" ] || { echo 0; return; }
-    find "$dir" -maxdepth 1 -type f -name "$pattern" 2>/dev/null | wc -l | tr -d ' '
-}
-count_files_excluding() {
-    local dir="$1" exclude="$2"
-    [ -d "$dir" ] || { echo 0; return; }
-    find "$dir" -maxdepth 1 -type f ! -name "$exclude" 2>/dev/null | wc -l | tr -d ' '
-}
+count_matching() { _count_find "$1" -maxdepth 1 -type f -name "$2"; }
+count_files_excluding() { _count_find "$1" -maxdepth 1 -type f ! -name "$2"; }
 
 gen_report() {
     local now

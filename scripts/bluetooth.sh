@@ -128,6 +128,15 @@ TOOL_NAME="bluetooth.sh"
 LOOT_DIR="/root/loot/bluetooth"
 PIDFILE="/tmp/pager-bluetooth.pid"
 LOGFILE="/tmp/pager-bluetooth.log"
+# IMPROVEMENT (richer --status output): which technique a background PID is
+# actually running was previously invisible to --status - it could only
+# ever say bare "Running (PID N)", which is a real gap when this gets
+# checked remotely (the Control Panel web server, or someone else on the
+# team SSH'd in) with no memory of which of --flood/--jam-area/--disrupt was
+# launched. TECHFILE records "label|start-epoch" alongside PIDFILE at
+# launch time (see launch_background()) so --status can report what's
+# running and for how long, not just that something is.
+TECHFILE="/tmp/pager-bluetooth.technique"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
@@ -232,7 +241,24 @@ advspam_instance_count() {
 
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
-        say "Running (PID $(cat "$PIDFILE"))."
+        # IMPROVEMENT: report WHICH technique is running and for how long,
+        # not just "Running (PID N)" - see TECHFILE's comment above for why.
+        # Falls back to the old bare message if TECHFILE is missing/stale
+        # (e.g. a PIDFILE from before this change) rather than erroring.
+        if [ -r "$TECHFILE" ]; then
+            tech_label=""; tech_start=""
+            IFS='|' read -r tech_label tech_start < "$TECHFILE"
+            case "$tech_start" in
+                ''|*[!0-9]*) say "Running: $tech_label (PID $(cat "$PIDFILE"))." ;;
+                *)
+                    elapsed=$(( $(date +%s 2>/dev/null || echo "$tech_start") - tech_start ))
+                    [ "$elapsed" -lt 0 ] 2>/dev/null && elapsed=0
+                    say "Running: $tech_label (PID $(cat "$PIDFILE"), ${elapsed}s elapsed)."
+                    ;;
+            esac
+        else
+            say "Running (PID $(cat "$PIDFILE"))."
+        fi
     else
         say "Not running."
     fi
@@ -249,6 +275,11 @@ if [ "$DO_STOP" = "1" ]; then
     else
         say "Nothing running."
     fi
+    # Matches TECHFILE's own lifecycle (written once per launch by
+    # launch_background()) - clear it here too so a stale label/elapsed
+    # time from a PREVIOUS run can't survive into the next --status check
+    # before something new is actually launched.
+    rm -f "$TECHFILE"
     timeout 5 btmgmt clr-adv >/dev/null 2>&1
     # BUG FOUND AND FIXED (live-diagnosed): --disrupt's loop calls LE Test
     # End itself after breaking out of its while-loop on STOPPING - which
@@ -310,6 +341,38 @@ command -v hciconfig >/dev/null 2>&1 || die "BlueZ tools not found (hciconfig mi
 ensure_radio_up() {
     timeout 5 hciconfig hci0 >/dev/null 2>&1 || die "No Bluetooth adapter (hci0) found."
     timeout 5 hciconfig hci0 up >/dev/null 2>&1
+}
+
+# IMPROVEMENT (DRY): --flood/--jam-area/--disrupt's --background path each
+# independently carried the exact same fork-and-verify sequence (fork the
+# run_* function into the background, record its PID, sleep 1, then check
+# is_running before claiming success - see git history for the three
+# separate "BUG FOUND AND FIXED" comments that each added this same
+# liveness check independently, one file-region at a time). Byte-for-byte
+# identical launch/verify logic across all three call sites is exactly the
+# kind of duplication lib/common.sh's own pid_running()/ip_link() consolidations
+# already argue against elsewhere in this toolkit ("a new call site added
+# without remembering the fix is exactly how the original bug-class
+# reappears") - collapsed into one helper here so there's exactly one place
+# that knows how to launch-and-verify a background technique. Only the
+# wording (which function to run, what to call it in messages, why it might
+# have failed, and one optional extra success note) varies between callers.
+launch_background() {
+    local run_func="$1" label="$2" reason="$3" extra="${4:-}"
+    ( trap '' HUP; "$run_func" ) >"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    sleep 1
+    if is_running; then
+        # See TECHFILE's own comment above for why this is written here:
+        # this is the one place every backgrounded technique launch passes
+        # through, so it's the one place that can reliably record which
+        # technique it was for --status to report later.
+        echo "$label|$(date +%s 2>/dev/null || echo 0)" > "$TECHFILE"
+        say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it.${extra:+ $extra}"
+    else
+        rm -f "$PIDFILE"
+        die "$label exited immediately - check $LOGFILE ($reason)."
+    fi
 }
 
 if [ "$DO_SCAN" = "1" ]; then
@@ -645,22 +708,10 @@ if [ "$DO_FLOOD" = "1" ]; then
     say "This L2CAP-floods a specific Bluetooth device - a real denial-of-service against it."
     confirm "Only run this against your own devices or ones you're authorized to test. Proceed?" || die "Aborted."
     if [ "$BACKGROUND" = "1" ]; then
-        ( trap '' HUP; run_flood ) >"$LOGFILE" 2>&1 &
-        echo $! > "$PIDFILE"
-        # BUG FOUND AND FIXED (found via code review, same class already
-        # fixed in sniff.sh/tracer.sh/PayloadRunner.sh/webui.sh): this
-        # printed "Started in background" unconditionally with no
-        # liveness check - ensure_radio_up (no hci0) or a bad --duration/
-        # --size handed to l2ping can make run_flood's subshell exit
-        # almost immediately, invisible to a check that doesn't wait and
-        # look.
-        sleep 1
-        if is_running; then
-            say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it. Check $LOGFILE / --status shortly to see if the target actually accepted a connection."
-        else
-            rm -f "$PIDFILE"
-            die "Flood exited immediately - check $LOGFILE (no Bluetooth adapter, or a bad argument, are the likely causes)."
-        fi
+        # (liveness-check history for this launch now lives in
+        # launch_background()'s own comment, above - was independently
+        # duplicated here, in --jam-area, and in --disrupt below.)
+        launch_background run_flood "Flood $TARGET" "no Bluetooth adapter, or a bad argument, are the likely causes" "Check $LOGFILE / --status shortly to see if the target actually accepted a connection."
     else
         run_flood
     fi
@@ -671,16 +722,7 @@ if [ "$DO_JAM_AREA" = "1" ]; then
     say "This scans, then L2CAP-floods EVERY Bluetooth device it finds nearby - a real denial-of-service against all of them, not just one."
     confirm "Only run this in an area/against devices you're authorized to test. Proceed?" || die "Aborted."
     if [ "$BACKGROUND" = "1" ]; then
-        ( trap '' HUP; run_jam_area ) >"$LOGFILE" 2>&1 &
-        echo $! > "$PIDFILE"
-        # Same liveness-check fix as --flood above.
-        sleep 1
-        if is_running; then
-            say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
-        else
-            rm -f "$PIDFILE"
-            die "Jam exited immediately - check $LOGFILE (no Bluetooth adapter, or l2ping missing, are the likely causes)."
-        fi
+        launch_background run_jam_area "Jam" "no Bluetooth adapter, or l2ping missing, are the likely causes"
     else
         run_jam_area
     fi
@@ -702,25 +744,10 @@ if [ "$DO_DISRUPT" = "1" ]; then
     say "This occupies the whole 2.4GHz Bluetooth band directly - no scan, no target, works on connected devices too (see this script's header for how/why)."
     confirm "Only run this against your own devices/area or ones you're authorized to test. Proceed?" || die "Aborted."
     if [ "$BACKGROUND" = "1" ]; then
-        ( trap '' HUP; run_disrupt ) >"$LOGFILE" 2>&1 &
-        echo $! > "$PIDFILE"
-        # BUG FOUND AND FIXED (found via code review): this was the one
-        # --background launch path in this file with no liveness check at
-        # all - --flood/--jam-area right above already fixed this exact
-        # class ("Started in background" printed unconditionally, even if
-        # ensure_radio_up/hcitool missing made the subshell exit almost
-        # immediately). --disrupt is arguably the more important one to
-        # get right here: it puts the radio into Direct Test Mode, so a
-        # user believing it's "running" when it actually died immediately
-        # could walk away thinking spectrum occupation is happening when
-        # it isn't.
-        sleep 1
-        if is_running; then
-            say "Started in background (PID $(cat "$PIDFILE")). Use --stop to end it."
-        else
-            rm -f "$PIDFILE"
-            die "Disrupt exited immediately - check $LOGFILE (no Bluetooth adapter, or hcitool missing, are the likely causes)."
-        fi
+        # Distinguishes the two disrupt modes in --status/error output too
+        # (see TECHFILE's comment above) - "Disrupt" vs "Disrupt (focus)".
+        dlabel="Disrupt"; [ "$FOCUS" = "1" ] && dlabel="Disrupt (focus)"
+        launch_background run_disrupt "$dlabel" "no Bluetooth adapter, or hcitool missing, are the likely causes"
     else
         run_disrupt
     fi

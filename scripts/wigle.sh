@@ -45,12 +45,24 @@ case "${1:-}" in
         ARGS=""
         while [ "${1:-}" = "--archive" ] || [ "${1:-}" = "--remove" ]; do ARGS="$ARGS $1"; shift; done
         [ $# -eq 0 ] && die "Give at least one file to upload, e.g. $LOOT_DIR/*"
-        # BIG CHANGE (found via code review): this file's own header
-        # already documents fixing the "unconditional success" class for
-        # --logout/--start/--stop, but --upload itself was missed - the
-        # ONE action here whose whole point is getting data to Wigle.net,
-        # over a real network call that can fail (bad credentials, no
-        # internet, a rejected file), with zero indication either way.
+        # IMPROVEMENT (round 1, genuine improvement pass - not a bug hunt):
+        # a typo'd/nonexistent file path used to sail straight through to
+        # WIGLE_UPLOAD, and the only failure message available afterwards
+        # was the generic "check network connectivity and Wigle login" -
+        # actively misleading for what's actually just a bad local path
+        # (nothing wrong with the network or the login at all). Checking
+        # locally first costs nothing (no network round-trip needed to
+        # discover a typo) and turns a misdiagnosed network/auth problem
+        # into an immediate, specific "which file(s) don't exist" answer.
+        # This also covers the unquoted-glob-with-no-match case (e.g.
+        # `wigle.sh --upload $LOOT_DIR/*` when the directory is empty) -
+        # the shell passes the literal unexpanded glob string through, and
+        # that's exactly the kind of path this check reports as not found.
+        _missing=""
+        for _f in "$@"; do
+            [ -e "$_f" ] || _missing="$_missing '$_f'"
+        done
+        [ -n "$_missing" ] && die "File(s) not found, nothing uploaded:$_missing"
         # shellcheck disable=SC2086
         WIGLE_UPLOAD $ARGS "$@" && say "Upload finished." || die "Upload failed - check network connectivity and Wigle login (wigle.sh --login)."
         ;;

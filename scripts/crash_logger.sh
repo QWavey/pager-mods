@@ -25,9 +25,15 @@
 # Usage: crash_logger.sh --background   (start, logs to /mmc/crash_dmesg.log)
 #        crash_logger.sh --stop
 #        crash_logger.sh --status
+#        crash_logger.sh --tail [N]         (print the last N lines - default
+#                                             50 - of the persistent log and
+#                                             exit; doesn't start/need the
+#                                             background logger)
 #
 # After a crash, read /mmc/crash_dmesg.log (survives the reboot) instead
-# of dmesg (which won't - it resets on every boot).
+# of dmesg (which won't - it resets on every boot). --tail is the quick way
+# to do that without having to remember the path or reach for `tail`/`cat`
+# separately over SSH.
 
 set -u
 PIDFILE="/tmp/pager-crashlogger.pid"
@@ -36,16 +42,44 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
 
-BACKGROUND=0; DO_STOP=0; DO_STATUS=0
+BACKGROUND=0; DO_STOP=0; DO_STATUS=0; DO_TAIL=0; TAIL_LINES=50
 while [ $# -gt 0 ]; do
     case "$1" in
         --background) BACKGROUND=1; shift ;;
         --stop) DO_STOP=1; shift ;;
         --status) DO_STATUS=1; shift ;;
+        # IMPROVEMENT (new feature): --tail is a plain read-only "show me
+        # the persistent log" mode - no background logger involved at all.
+        # Genuinely useful on its own: after a crash/reboot the whole point
+        # of this file is that /mmc/crash_dmesg.log survived when dmesg
+        # didn't, but until now actually READING it still meant a separate
+        # `cat`/`tail` invocation with the path spelled out by hand. The
+        # optional N is validated the same digit-only way PayloadRunner.sh's
+        # picker validates its menu choice (see that file) - anything that
+        # isn't a plain positive integer is treated as "no N given" and
+        # left for the next arg/usage handling instead of being silently
+        # misinterpreted, and defaults to 50 lines (enough context around a
+        # crash without dumping a potentially 20MB file to the terminal).
+        --tail)
+            DO_TAIL=1
+            case "${2:-}" in
+                ''|*[!0-9]*) shift ;;
+                *) TAIL_LINES="$2"; shift 2 ;;
+            esac
+            ;;
         -h|--help) usage ;;
         *) err "Unknown argument: $1"; usage ;;
     esac
 done
+
+if [ "$DO_TAIL" = "1" ]; then
+    if [ -f "$LOGFILE" ]; then
+        tail -n "$TAIL_LINES" "$LOGFILE"
+    else
+        say "No crash log yet at $LOGFILE (crash_logger.sh hasn't been started with --background since the last flash, or nothing's been captured)."
+    fi
+    exit 0
+fi
 
 # BIG CHANGE (adopting common.sh's shared primitive): same PIDFILE+kill-0
 # check duplicated across deauth.sh/sniff.sh/bluetooth.sh - now backed by
@@ -103,10 +137,25 @@ run_logger() {
     # (keeps the tail) instead of deleting so recent forensic context
     # always survives.
     local max_log_bytes=$((20 * 1024 * 1024))
+    # IMPROVEMENT (performance, run continuously every 1s - the tightest
+    # poll loop in this toolkit): this used to call the `dmesg` binary
+    # TWICE per iteration whenever new lines showed up - once for `wc -l`
+    # to get the count, then again for `tail` to actually read the new
+    # lines - paying for the fork+exec+kernel-ring-buffer-read twice for
+    # what is the same snapshot. Captured once into a variable instead and
+    # both the count and the tail are derived from that same string.
+    # Verified equivalent with a standalone repro (fake dmesg() with a call
+    # counter): identical output, dmesg invocations per "new lines"
+    # iteration dropped from 2 to 1 - at a 1s poll interval this is the
+    # single most-repeated fork in the whole toolkit, so the saving
+    # compounds the most here. The no-change path (the common case, most
+    # iterations) was already just 1 call and stays that way.
+    local dmesg_now
     while true; do
-        total=$(dmesg 2>/dev/null | wc -l)
+        dmesg_now=$(dmesg 2>/dev/null)
+        total=$(printf '%s\n' "$dmesg_now" | wc -l)
         if [ "$total" -gt "$seen" ] 2>/dev/null; then
-            dmesg 2>/dev/null | tail -n "+$((seen + 1))" >> "$LOGFILE"
+            printf '%s\n' "$dmesg_now" | tail -n "+$((seen + 1))" >> "$LOGFILE"
             sync
             seen="$total"
         elif [ "$total" -lt "$seen" ] 2>/dev/null; then
@@ -132,7 +181,7 @@ run_logger() {
             # pragmatic fix for the realistic failure mode, not a
             # mathematically airtight one.
             echo "=== crash_logger: dmesg buffer appears to have wrapped (was $seen lines, now $total) - capturing current buffer ===" >> "$LOGFILE"
-            dmesg 2>/dev/null >> "$LOGFILE"
+            printf '%s\n' "$dmesg_now" >> "$LOGFILE"
             sync
             seen="$total"
         fi

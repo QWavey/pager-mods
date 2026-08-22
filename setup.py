@@ -50,6 +50,9 @@ Usage:
     python3 setup.py --skip-payloads
     python3 setup.py --force            (ignore the incremental cache, push everything)
     python3 setup.py --quiet            (only print section headers, not every file)
+    python3 setup.py --dry-run          (show what WOULD be uploaded/pruned - no
+                                          connection made, nothing is changed. Works
+                                          even with no config.txt / device offline.)
 
 config.txt format:
     ip=172.16.52.1
@@ -112,6 +115,84 @@ def read_config(path):
         print(f"ERROR: {path} must contain 'ip=' and 'password=' lines.")
         sys.exit(1)
     return cfg
+
+
+# IMPROVEMENT (new feature): --dry-run needs to answer "what would this run
+# actually do" using ONLY the same sha1-vs-state comparison upload_tree/
+# deploy_payloads already do - but without ever touching sftp/paramiko, so
+# it can run fully offline (no device connection at all, nothing to break
+# if the device is unreachable). Deliberately a separate read-only function
+# rather than threading a `dry_run` flag through upload_tree/deploy_payloads
+# themselves: those two are already-verified, side-effecting code paths (SFTP
+# writes, chmod, killing/restarting the pineapple app process) - duplicating
+# just the read/hash/compare logic here keeps the real upload path completely
+# unmodified and untouched, rather than risking a `dry_run` branch drifting
+# from or accidentally short-circuiting the tested behavior.
+def plan_scripts(local_root, remote_root, state, force=False):
+    """Read-only preview of what upload_tree() would do: same walk/hash/skip
+    logic, same SKIP_DIRS/SKIP_SUFFIXES, but no sftp calls of any kind."""
+    SKIP_DIRS = {"__pycache__", ".git"}
+    SKIP_SUFFIXES = (".pyc", ".pyo")
+
+    to_upload = []
+    unchanged = 0
+    seen_remote_paths = set()
+    for dirpath, dirnames, filenames in os.walk(local_root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        rel = os.path.relpath(dirpath, local_root)
+        remote_dir = remote_root if rel == "." else remote_root + "/" + rel.replace(os.sep, "/")
+        for fname in filenames:
+            if fname.endswith(SKIP_SUFFIXES):
+                continue
+            local_path = os.path.join(dirpath, fname)
+            remote_path = remote_dir + "/" + fname
+            seen_remote_paths.add(remote_path)
+            with open(local_path, "rb") as f:
+                content = f.read()
+            digest = hashlib.sha1(content.replace(b"\r\n", b"\n")).hexdigest()
+            if not force and state.get(remote_path) == digest:
+                unchanged += 1
+            else:
+                to_upload.append(remote_path)
+
+    prefix = remote_root + "/"
+    stale = sorted(p for p in state if p.startswith(prefix) and p not in seen_remote_paths)
+    return sorted(to_upload), unchanged, stale
+
+
+def plan_payloads(local_payloads_root, state, force=False):
+    """Read-only preview of what deploy_payloads() would do: same content-
+    hash + PAYLOAD_META-hash cache key, but no sftp/exec_command calls."""
+    if not os.path.isdir(local_payloads_root):
+        return [], 0
+
+    to_upload = []
+    unchanged = 0
+    for category in sorted(os.listdir(local_payloads_root)):
+        cat_path = os.path.join(local_payloads_root, category)
+        if not os.path.isdir(cat_path):
+            continue
+        for payload_name in sorted(os.listdir(cat_path)):
+            payload_local = os.path.join(cat_path, payload_name)
+            payload_sh_local = os.path.join(payload_local, "payload.sh")
+            if not os.path.isfile(payload_sh_local):
+                continue
+
+            remote_dir = f"/root/payloads/user/{category}/{payload_name}"
+            meta = PAYLOAD_META.get(payload_name, {
+                "title": payload_name, "author": "unknown", "description": "", "version": "1.0",
+            })
+            with open(payload_sh_local, "rb") as f:
+                content = f.read().replace(b"\r\n", b"\n")
+            content_hash = hashlib.sha1(content).hexdigest()
+            meta_hash = hashlib.sha1(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()
+            cache_value = f"{content_hash}:{meta_hash}"
+            state_key = f"{remote_dir}/payload.sh"
+            if not force and state.get(state_key) == cache_value:
+                unchanged += 1
+            else:
+                to_upload.append(f"{category}/{payload_name}")
+    return sorted(to_upload), unchanged
 
 
 def upload_tree(sftp, local_root, remote_root, log, state, force=False):
@@ -435,8 +516,54 @@ def main():
     ap.add_argument("--skip-token", action="store_true", help="Don't touch the Control Panel access token")
     ap.add_argument("--force", action="store_true", help="Re-upload everything, ignoring the incremental deploy cache (.deploy_state.json)")
     ap.add_argument("--quiet", action="store_true", help="Only print section headers, not every uploaded file - for the auto-sync wrapper")
+    ap.add_argument("--dry-run", action="store_true", help="Show what would be uploaded/pruned and exit - no device connection, nothing is changed")
     args = ap.parse_args()
     log = (lambda *a, **k: None) if args.quiet else print
+
+    # IMPROVEMENT (new feature): handled before the config.txt check on
+    # purpose - a dry run never connects to anything, so it doesn't need
+    # ip=/password= either. Lets you preview a pending push (e.g. right
+    # after editing a script) even with the device fully offline/unreachable
+    # or no config.txt written yet.
+    if args.dry_run:
+        print("== Pager Toolkit Setup (DRY RUN - no connection made, nothing will change) ==")
+        state = load_state()
+        local_scripts = os.path.join(HERE, "scripts")
+        if not os.path.isdir(local_scripts):
+            print(f"ERROR: {local_scripts} not found - is this setup.py still next to its scripts/ folder?")
+            sys.exit(1)
+
+        to_upload, unchanged, stale = plan_scripts(local_scripts, REMOTE_ROOT, state, force=args.force)
+        print(f"\nScripts ({REMOTE_ROOT}):")
+        if to_upload:
+            print(f"  Would upload {len(to_upload)} file(s):")
+            for p in to_upload:
+                print(f"    + {p}")
+        else:
+            print("  Nothing to upload.")
+        if stale:
+            print(f"  Would remove {len(stale)} stale file(s) no longer in the local tree:")
+            for p in stale:
+                print(f"    - {p}")
+        print(f"  ({unchanged} file(s) unchanged since last push)")
+
+        if not args.skip_payloads:
+            local_payloads = os.path.join(HERE, "payloads")
+            payload_upload, payload_unchanged = plan_payloads(local_payloads, state, force=args.force)
+            print(f"\nPayloads (/root/payloads/user/):")
+            if payload_upload:
+                print(f"  Would upload/update {len(payload_upload)} payload(s):")
+                for p in payload_upload:
+                    print(f"    + {p}")
+                print("  (a pineapple app restart would follow, so the dashboard picks up the new list)")
+            else:
+                print("  Nothing to upload.")
+            print(f"  ({payload_unchanged} payload(s) unchanged since last push)")
+
+        print("\nDry run only - no connection was made, nothing was uploaded or removed.")
+        if not args.force:
+            print("(add --force to preview a full re-push that ignores the incremental cache)")
+        return
 
     if not os.path.isfile(args.config):
         print(f"ERROR: config file not found: {args.config}")
