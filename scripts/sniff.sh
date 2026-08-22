@@ -669,9 +669,31 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
     # independent" message was also just wrong: eth0's normal home is
     # br-lan, not masterless. Restore it explicitly here instead of
     # hoping the watchdog (already stopped, one line up) catches it.
+    #
+    # BUG FOUND AND FIXED (live-caught): the delete call's own success was
+    # never checked - confirmed live that it can transiently fail (a
+    # netlink socket still settling right after a disruptive bridge
+    # teardown), leaving $BRIDGE_NAME existing as an empty, orphaned
+    # bridge device while this still unconditionally claimed "Bridge torn
+    # down." eth0 restoration (the part that actually matters for SSH) is
+    # unaffected either way, but the message should tell the truth about
+    # the bridge device itself too. Short retry (same reasoning as
+    # canonicalize_lan_topology's own) before reporting honestly.
+    tries=0
+    while [ "$tries" -lt 3 ] && ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; do
+        tries=$((tries + 1))
+        if [ "$tries" -lt 3 ]; then
+            sleep 1
+            ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
+        fi
+    done
     ip_link set eth0 master br-lan 2>/dev/null
     ip_link set eth0 up 2>/dev/null
-    say "Bridge torn down. eth0 restored to br-lan (management access) - eth1 is independent again."
+    if ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; then
+        err "eth0 restored to br-lan (management access is fine), but $BRIDGE_NAME itself could not be removed - it's left behind as an empty, harmless bridge device. Try 'sniff.sh --unbridge' again, or 'ip link delete $BRIDGE_NAME type bridge' by hand."
+    else
+        say "Bridge torn down. eth0 restored to br-lan (management access) - eth1 is independent again."
+    fi
     exit 0
 fi
 

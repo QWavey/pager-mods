@@ -303,7 +303,18 @@ reset_network() {
     if timeout 5 ip link show br-sniff >/dev/null 2>&1; then
         timeout 5 ip link set br-sniff down >/dev/null 2>&1
         timeout 5 ip link delete br-sniff type bridge >/dev/null 2>&1
-        say "br-sniff removed."
+        # BUG FOUND AND FIXED (live-caught, same class just fixed in
+        # sniff.sh's own --unbridge): this claimed "br-sniff removed"
+        # unconditionally - confirmed live that the delete call can
+        # transiently fail (a netlink socket still settling right after a
+        # disruptive bridge teardown), leaving br-sniff existing as an
+        # empty, orphaned device while reset.sh - the dedicated recovery
+        # tool, of all things - reported success anyway.
+        if timeout 5 ip link show br-sniff >/dev/null 2>&1; then
+            err "br-sniff still exists after attempting to remove it - it's an empty, harmless bridge device at this point, but 'ip link delete br-sniff type bridge' by hand (or re-running this reset) may be needed to fully clear it."
+        else
+            say "br-sniff removed."
+        fi
     else
         say "No br-sniff bridge found."
     fi
