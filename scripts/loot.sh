@@ -24,10 +24,25 @@ do_list() {
     # pc_link.sh), bluetooth (bluetooth.sh), deadnet (deadnet.sh), and
     # reports (report.sh --save) were all silently absent from this
     # summary even when full of real captures.
+    #
+    # BIG CHANGE: a file COUNT alone doesn't answer the question this
+    # summary actually exists for after a field engagement - "how much is
+    # here, and is any of it fresh?" Added real size (du -sh) and the most
+    # recently modified file's name per directory. Deliberately built from
+    # `ls -t` (newest-first) rather than GNU find's `-printf` - this device
+    # runs busybox, which does NOT support `-printf` (confirmed pattern
+    # this codebase avoids elsewhere too), so this stays on primitives
+    # that are actually available here.
     for d in handshakes pcap wigle lanscan payload-runs archive sniff bluetooth deadnet reports; do
         if [ -d "$LOOT_ROOT/$d" ]; then
             n=$(find "$LOOT_ROOT/$d" -type f 2>/dev/null | wc -l)
-            echo "  $d: $n file(s)"
+            if [ "$n" -gt 0 ] 2>/dev/null; then
+                size=$(du -sh "$LOOT_ROOT/$d" 2>/dev/null | awk '{print $1}')
+                newest=$(ls -t "$LOOT_ROOT/$d" 2>/dev/null | head -1)
+                echo "  $d: $n file(s), ${size:-?} - newest: ${newest:-?}"
+            else
+                echo "  $d: 0 files"
+            fi
         fi
     done
 }

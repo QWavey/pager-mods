@@ -81,11 +81,20 @@ payloads/, then the two installer scripts.
     has every element app.js's new features needed, no gap found)
 25. [x] scripts/guiserver/static/style.css (verdict: left as-is - .out
     already has max-height/overflow-y:auto, no gap found)
-26. [ ] scripts/help
-27. [ ] scripts/led.sh
-28. [ ] scripts/loot.sh
-29. [ ] scripts/mgmt.sh
-30. [ ] scripts/mimic.sh
+26. [x] scripts/help - added a drift-detection safety net (warns about any
+    *.sh under scripts/ not yet listed), same class of gap server.py's
+    ALLOWED_SCRIPTS already had
+27. [x] scripts/led.sh - added success/failure reporting (was the one
+    wrapper in the toolkit with zero feedback of any kind)
+28. [x] scripts/loot.sh - --list now shows size + most-recent-file per
+    directory, not just a bare count (busybox-safe: du -sh + ls -t, no
+    GNU-find-only flags)
+29. [x] scripts/mgmt.sh - added confirm() gates to --on/--off/--hide (they
+    fired with ZERO confirmation ever, even without -y - the one AP in the
+    toolkit that can disconnect your own management session)
+30. [x] scripts/mimic.sh (verdict: left as-is - already fully hardened, no
+    confirmed way to add --status without guessing at unverified platform
+    internals)
 31. [ ] scripts/openap.sh
 32. [ ] scripts/pc_link.sh
 33. [ ] scripts/pcap.sh

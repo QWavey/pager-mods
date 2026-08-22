@@ -86,3 +86,26 @@ echo "Note: 'wifi', 'autossh', and 'reset' are reserved by real OpenWRT/"
 echo "system commands (/sbin/wifi, /usr/sbin/autossh, /usr/bin/reset - the"
 echo "terminal-reset utility) - use 'wifictl'/'autosshctl'/'devreset' for"
 echo "this toolkit's versions instead."
+
+# BIG CHANGE: the list above is manually curated on purpose (the section
+# groupings - Networking, Recon/Capture, Attacks, etc - are real, meaningful
+# organization a plain directory scan couldn't reproduce), but a manually
+# curated list can drift exactly the way this session's own server.py's
+# ALLOWED_SCRIPTS did - sniff.sh/bluetooth.sh/pc_link.sh/reset.sh all
+# existed as real, working CLI scripts before anyone remembered to add them
+# there, silently unreachable from the Control Panel in the meantime. Same
+# risk here: a newly-added script that nobody remembers to add to this file
+# would just never show up in `help`. Rather than replace the curation,
+# add the safety net that was missing - warn about any *.sh under scripts/
+# that isn't mentioned anywhere above, so drift gets caught instead of
+# discovered by accident later.
+_missing=""
+for _f in "$SCRIPT_DIR"/*.sh; do
+    _base="$(basename "$_f")"
+    [ "$_base" = "common.sh" ] && continue
+    grep -qF "\"\$SCRIPT_DIR/$_base\"" "$0" || _missing="$_missing $_base"
+done
+if [ -n "$_missing" ]; then
+    echo
+    echo "NOTE: these scripts exist under scripts/ but aren't listed above yet -$_missing"
+fi

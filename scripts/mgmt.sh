@@ -64,6 +64,24 @@ fi
 # BUG FOUND AND FIXED (found via code review, same class as the last_ssid
 # fix below): these printed a success message unconditionally regardless
 # of whether WIFI_MGMT_AP_HIDE/_DISABLE actually succeeded.
+#
+# BIG CHANGE (found via code review while looking at this file's own
+# --on path below): --off/--hide fired IMMEDIATELY with no confirmation at
+# all, ever, even without -y - unlike --clear just above (which always
+# confirms) and unlike virtually every other AP-changing script in this
+# toolkit (openap.sh/EvilTwin.sh/config.sh all confirm before applying).
+# This is the ONE AP in the whole toolkit whose own settings can cut off
+# the very management channel you're issuing the command through (Management
+# WiFi is a br-lan member alongside USB-C/eth0 - see reset.sh's header) -
+# if anything here deserves the same "warn before you might disconnect
+# yourself" caution this session's other incidents were all about, it's
+# this script, not fewer prompts than the less-consequential ones.
+if [ "$DO_HIDE" = "1" ] && [ "$ASSUME_YES" != "1" ]; then
+    confirm "Hide the Management AP's SSID? If you're connected to it over Management WiFi right now (not USB-C), this can make reconnecting harder." || die "Aborted."
+fi
+if [ "$DO_OFF" = "1" ] && [ "$ASSUME_YES" != "1" ]; then
+    confirm "Disable the Management AP? If you're connected to it over Management WiFi right now (not USB-C), this WILL disconnect your current session." || die "Aborted."
+fi
 [ "$DO_HIDE" = "1" ] && { WIFI_MGMT_AP_HIDE wlan0mgmt && say "Management AP hidden." || err "Failed to hide the Management AP."; }
 [ "$DO_OFF" = "1" ] && { WIFI_MGMT_AP_DISABLE wlan0mgmt && say "Management AP disabled." || err "Failed to disable the Management AP."; }
 
@@ -82,6 +100,17 @@ fi
 if [ "$DO_ON" = "1" ]; then
     [ -z "$SSID" ] && die "--name is required with --on."
     [ -z "$PASS" ] && die "--pw is required with --on (Management AP cannot be open)."
+    # BIG CHANGE (same reasoning as --off/--hide above): a CLI `mgmt.sh --on
+    # --name ... --pw ...` used to apply immediately with NO confirmation
+    # at all, unlike this script's own interactive mode (which always asks
+    # first). Changing the SSID/password disconnects anyone already
+    # associated over Management WiFi with the OLD credentials, same risk
+    # class as --off/--hide. Skipped when INTERACTIVE already asked
+    # ("Configure/enable the Management AP now?") - re-confirming the exact
+    # same intent a second time would just be friction, not more safety.
+    if [ "$INTERACTIVE" != "1" ] && [ "$ASSUME_YES" != "1" ]; then
+        confirm "Set the Management AP to '$SSID'? If you're connected to it over Management WiFi right now (not USB-C), you'll need to reconnect with the new credentials afterward." || die "Aborted."
+    fi
     # BUG FOUND AND FIXED (found via code review): cfg_set ran unconditionally
     # after WIFI_MGMT_AP, so a failed apply still persisted "last_ssid" as if
     # it had succeeded - the next interactive run would suggest a name that
