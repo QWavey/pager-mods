@@ -40,8 +40,32 @@ need() {
 theme_wifi() {
     need deauth.sh || return
     local a
-    a=$(LIST_PICKER "WiFi" "Air recon (APs/clients)" "Deauth a target" "Handshake/PMKID capture" "WPS (scan / pixie)" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
+    a=$(LIST_PICKER "WiFi" "Air recon (APs/clients)" "Deauth a target" "Handshake/PMKID capture" "WPS (scan / pixie)" "wifite2 (auto audit)" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
     case "$a" in
+    "wifite2 (auto audit)")
+        need wifite2.sh || return
+        if [ -z "$(find_external_wifi)" ]; then
+            ERROR_DIALOG "wifite2 needs the external A8000 (it won't touch the PineAP radios). Plug it in, or run 'wifite2' over SSH for full interactive control."
+            return
+        fi
+        local wtype secs targ
+        wtype=$(LIST_PICKER "wifite2 attack" "PMKID (clientless)" "WPA handshake" "WPS / Pixie" "PMKID (clientless)") || return
+        secs=$(NUMBER_PICKER "Scan seconds, then attack all in range" "30") || return
+        case "$wtype" in
+            "PMKID (clientless)") targ="--pmkid" ;;
+            "WPA handshake")      targ="--wpa" ;;
+            "WPS / Pixie")        targ="--wps" ;;
+        esac
+        CONFIRMATION_DIALOG "wifite2 will attack ALL $wtype networks in range after ${secs}s. Authorized area only - continue?" || return
+        LOG "wifite2 pillage ($wtype) on the external adapter - see /tmp/pager-wifite2.log"
+        ( "$S/wifite2.sh" $targ -p "$secs" --kill >/tmp/pager-wifite2.log 2>&1 ) &
+        local wp=$!
+        ALERT "wifite2 running - press B to stop"
+        WAIT_FOR_BUTTON_PRESS B
+        kill "$wp" 2>/dev/null; pkill -f Wifite.py 2>/dev/null
+        LOG "wifite2 stopped. Loot in /root/loot + hs/ ; log /tmp/pager-wifite2.log"
+        ALERT "wifite2 stopped"
+        ;;
     "Air recon (APs/clients)")
         need airscout.sh || return
         local secs

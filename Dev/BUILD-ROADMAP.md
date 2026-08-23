@@ -56,7 +56,7 @@ offload).
 
 ## Cluster G — Bettercap & Wifite (build LAST)
 - [ ] **BC1** bettercap (Go) + bettercap.sh  (clone github.com/bettercap/bettercap, build/port MIPS)
-- [ ] **WF1** wifite2 (Python) + wifite2.sh  (clone github.com/derv82/wifite2, port)
+- [x] **WF1** wifite2 (Python) + wifite2.sh  (cloned to /mmc/wifite2, runs under python3.11 - banner+help verified live; wrapper sets env + steers to external adapter; --install self-provisions; wired in Controller WiFi as auto-audit/pillage)
 
 ## Notes
 - Cracking on-box: aircrack-ng dictionary against a small wordlist; big cracks
