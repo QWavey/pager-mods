@@ -458,70 +458,6 @@ def deploy_payloads(client, sftp, local_payloads_root, log, state, force=False):
             log("  WARNING: pineapple app process did not respawn - you may need to power-cycle the device.")
 
 
-# BUG FOUND AND FIXED (found live, via a real reboot): usb_monitor.sh only
-# ever gets (re)started by setup.py explicitly checking/launching it - there
-# was no autostart mechanism of any kind (confirmed live: no /etc/init.d
-# entry for it, /etc/rc.local was still the untouched default stub, no
-# crontab). A physical reboot leaves it not running until someone thinks to
-# re-run setup.py or start it by hand - exactly what was observed: it was
-# running right after a deploy, then simply wasn't anymore a few minutes
-# later with nothing left running or logged, consistent with never having
-# been restarted after whatever stopped it (or a boot in between).
-# /etc/rc.local is the standard, OpenWRT-documented place for "run once
-# system init finished" - this ensures ONE idempotent line there so a
-# reboot brings the USB attach/detach watcher back on its own. Read-modify-
-# write via SFTP (not a remote shell one-liner) specifically to avoid
-# fragile quoting over an SSH exec_command round-trip for something that
-# edits a system boot file.
-USB_MONITOR_AUTOSTART_LINE = "[ -x /root/scripts/usb_monitor.sh ] && /root/scripts/usb_monitor.sh --background >/dev/null 2>&1"
-
-
-def ensure_usb_monitor_autostart(client, log):
-    try:
-        sftp = client.open_sftp()
-        # BUG FOUND AND FIXED: this is a third, independent SFTP session
-        # (client.open_sftp() opens a brand-new channel - it does not share
-        # the timeout of the sftp objects in main()) and it never got the
-        # same fix already applied to those other two at lines 616/711
-        # above. Without it, sftp.open()'s read()/write() here could block
-        # forever on a stalled connection (WiFi drop mid-write) instead of
-        # raising - and since this call is writing to /etc/rc.local, a
-        # system boot file, on a device that had already just been power-
-        # cycled/rebooted once tonight (see this function's own docstring
-        # comment above), a hang here is a real, not theoretical, risk.
-        # Worse: while hung, the broad `except Exception` below never even
-        # fires (there's nothing to catch yet), so the "WARNING: could not
-        # ensure..." message would never print either - just a silent
-        # indefinite hang with no diagnostic at all. Same fix, same reason.
-        sftp.get_channel().settimeout(30)
-        try:
-            with sftp.open("/etc/rc.local", "r") as f:
-                content = f.read().decode("utf-8", errors="replace")
-        except IOError:
-            content = "exit 0\n"
-        if USB_MONITOR_AUTOSTART_LINE in content:
-            log("  usb_monitor.sh autostart already present in /etc/rc.local.")
-            sftp.close()
-            return
-        lines = content.splitlines()
-        # Insert right before the final "exit 0" - OpenWRT's rc.local always
-        # ends with one, and anything placed AFTER it would never run.
-        insert_at = len(lines)
-        for i, line in enumerate(lines):
-            if line.strip() == "exit 0":
-                insert_at = i
-                break
-        lines.insert(insert_at, USB_MONITOR_AUTOSTART_LINE)
-        new_content = "\n".join(lines) + "\n"
-        with sftp.open("/etc/rc.local", "w") as f:
-            f.write(new_content.encode("utf-8"))
-        sftp.chmod("/etc/rc.local", 0o755)
-        sftp.close()
-        log("  Added usb_monitor.sh autostart to /etc/rc.local - it will survive a reboot now.")
-    except Exception as e:
-        log(f"  WARNING: could not ensure usb_monitor.sh autostart in /etc/rc.local: {e}")
-
-
 def main():
     ap = argparse.ArgumentParser(description="Install the Pager Toolkit onto a WiFi Pineapple Pager.")
     ap.add_argument("--config", default=os.path.join(HERE, "config.txt"))
@@ -635,10 +571,7 @@ def main():
         sys.exit(1)
 
     run(f"mkdir -p {REMOTE_ROOT}")
-    _usb_monitor_remote = f"{REMOTE_ROOT}/usb_monitor.sh"
-    _usb_monitor_digest_before = state.get(_usb_monitor_remote)
     uploaded, skipped, seen_remote_paths = upload_tree(sftp, local_scripts, REMOTE_ROOT, log, state, force=args.force)
-    usb_monitor_changed = state.get(_usb_monitor_remote) != _usb_monitor_digest_before
     prune_stale_scripts(sftp, state, seen_remote_paths, log)
     save_state(state)  # save after every phase, not just at the end - a
     # later phase failing shouldn't lose credit for scripts that already
@@ -669,30 +602,6 @@ def main():
         "grep -q 'root/scripts' /root/.profile 2>/dev/null || "
         "echo 'export PATH=\"$PATH:/root/scripts\"' >> /root/.profile"
     )
-
-    # usb_monitor.sh: notifies on every USB-C/USB-A attach/detach.
-    # Deliberately not a payload/picker - just a plain always-on watcher,
-    # so it's started here automatically rather than needing anyone to
-    # remember to launch it by hand. Idempotent: only starts it if it
-    # isn't already running (e.g. a re-deploy shouldn't spawn a second one)
-    # - EXCEPT when the script's own content just changed (usb_monitor_changed,
-    # computed from upload_tree's hash cache above), in which case the
-    # already-running copy is the OLD code and needs restarting to pick up
-    # the change - otherwise a fix to this file would silently never take
-    # effect until someone thought to restart it by hand.
-    print("Starting usb_monitor.sh (USB-C/USB-A attach/detach watcher)...")
-    rc, out, err = run(f". /root/.profile && {REMOTE_ROOT}/usb_monitor.sh --status", timeout=10)
-    if "Running" in out and not usb_monitor_changed:
-        print("  Already running.")
-    else:
-        if "Running" in out:
-            run(f". /root/.profile && {REMOTE_ROOT}/usb_monitor.sh --stop", timeout=10)
-            print("  Script changed - restarting to pick up the update...")
-        run(f". /root/.profile && {REMOTE_ROOT}/usb_monitor.sh --background", timeout=10)
-        print("  Started.")
-
-    print("Ensuring usb_monitor.sh survives a reboot (/etc/rc.local)...")
-    ensure_usb_monitor_autostart(client, log)
 
     if not args.skip_python3:
         rc, out, err = run("which python3", timeout=10)
@@ -753,8 +662,7 @@ if __name__ == "__main__":
     # BUG FOUND AND FIXED: only the initial client.connect() call (inside
     # main()) was ever wrapped in a try/except - every subsequent operation
     # (run()'s exec_command() calls, upload_tree()'s/deploy_payloads()'s
-    # direct sftp.mkdir()/putfo()/remove() calls, ensure_usb_monitor_
-    # autostart()'s own sftp read/write of /etc/rc.local) assumes the SSH
+    # direct sftp.mkdir()/putfo()/remove() calls) assumes the SSH
     # session stays up for the whole deploy. Traced every call site between
     # the connect() and client.close() at the end of main(): none of them
     # are guarded, so a real mid-deploy disconnect (WiFi dropout, device

@@ -25,10 +25,8 @@
 #
 # WHAT THIS DOES NOT COVER: anything requiring a real tcpdump capture or a
 # real wired interface - the --bridge/--unbridge kernel-facing steps
-# (ip_link calls, actual bridge creation), the watchdog subshells (including
-# the USB_A_STATEFILE freshness hint inside start_lan_watchdog, which is
-# inline loop code rather than a standalone function), the live run_creds_
-# watcher/run_packet_feed re-scan loops, --background launch and PID
+# (ip_link calls, actual bridge creation), the watchdog subshells, the live
+# run_creds_watcher/run_packet_feed re-scan loops, --background launch and PID
 # tracking end-to-end, and summarize_pcap's actual tcpdump -A/-nn
 # invocations (only the pure classification/extraction functions it calls
 # are covered - though the CREDS_PATTERN/HTTP_PATTERN regexes those calls

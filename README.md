@@ -47,7 +47,6 @@ itself is gitignored, never committed).
 - `pc_link.sh`: detect a PC wired directly to the Pager and capture + summarize its traffic.
 - `LanScan.sh`: nmap-based LAN scanner over the Ethernet/USB-C interface.
 - `pcap.sh`: start/stop the Pineapple's own optimized WiFi packet capture.
-- `usb_monitor.sh`: background daemon that notifies on USB-C/USB-A attach and detach.
 
 ### WiFi client & connectivity
 

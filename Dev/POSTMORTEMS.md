@@ -248,10 +248,9 @@ duration/timeout parameter of its own, and there is no separate
 toast/snackbar-style primitive documented anywhere in Hak5's own docs or
 example payloads. `ALERT` is also conventionally reserved by Hak5 itself
 for rare, high-signal events (their own "alert payloads" trigger only on
-deauth floods, handshakes, and client connections) - `usb_monitor.sh`'s
-attach/detach notifications and the sniffer's routine traffic lines
-deliberately use plain `LOG` instead, on purpose, not as an unfinished
-feature.
+deauth floods, handshakes, and client connections) - the sniffer's
+routine traffic lines deliberately use plain `LOG` instead, on purpose,
+not as an unfinished feature.
 </details>
 
 <details>
@@ -303,13 +302,25 @@ render a new alert until some later UI activity (such as the replug)
 flushes it. No userspace script can fix a render delay inside a closed
 binary.
 
-Resolution: `usb_monitor.sh` was rewritten clean (the iterative version
-is kept at `old/usb_monitor_old.sh`). The rewrite keeps the proven
-detection and process-lifecycle logic, drops all the notification
-machinery that was chasing this (alert lock, auto-dismiss, debounce,
-diagnostic logging, the python coupling), and fires a plain instant
-`ALERT` on every event. The USB-C-detach render timing is documented as a
-known platform limitation in the script's own header rather than pretended
-fixed. `lib/dismiss_alert.py` is kept (it's genuinely useful,
-hard-won reverse engineering) but no longer wired into the daemon.
+Two more approaches were tried after the rewrite. First, a direct
+framebuffer path: draw the banner straight to `/dev/fb0` (bypassing the
+closed UI entirely), with a **persistent always-redrawing renderer**
+process (`lib/fb_renderer.py`) modelled on an on-screen clock that had
+been proven to survive the ~1s re-enumeration screen-wipe. The render
+path worked perfectly *while connected* (verified via a diagnostic log on
+`/mmc`, which survives the unplug), but the detach banner still did not
+reliably appear *during* a real USB-C unplug. Second, redeploying the
+original `ALERT`-based version from a backup - same symptom.
+
+Final resolution: **the entire USB attach/detach notification feature was
+removed** - `usb_monitor.sh`, `lib/fb_renderer.py`, `lib/fb_notify.py`,
+`lib/dismiss_alert.py`, `old/usb_monitor_old.sh`, and all wiring in
+`setup.py` (deploy/start/`rc.local` autostart), `reset.sh`
+(`ensure_usb_monitor`), and the now-dead `USB_A_STATEFILE` fast-path hint
+in `sniff.sh`. The root cause is a render delay inside Hak5's closed UI
+process on real USB-C re-enumeration; after exhausting `ALERT`, framebuffer,
+and persistent-renderer approaches it was judged not reliably fixable from
+userspace, and not worth the complexity it was adding to the toolkit. This
+section is kept as the record of what was tried and why, so it isn't
+attempted again from scratch.
 </details>

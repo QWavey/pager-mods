@@ -75,7 +75,6 @@ print_row "loot"      "$SCRIPT_DIR/loot.sh"
 print_row "report"    "$SCRIPT_DIR/report.sh"
 print_row "config"    "$SCRIPT_DIR/config.sh"
 print_row "devreset"  "$SCRIPT_DIR/reset.sh"
-print_row "usb_monitor" "$SCRIPT_DIR/usb_monitor.sh"
 print_row "crash_logger" "$SCRIPT_DIR/crash_logger.sh"
 echo
 echo "-- Control Panel (web GUI) --"

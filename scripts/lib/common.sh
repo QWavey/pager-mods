@@ -192,7 +192,7 @@ ip_link() { timeout "$IP_LINK_TIMEOUT" ip link "$@"; }
 # match if /proc/$PID/cmdline (real, live, comes straight from the kernel -
 # not the PIDFILE's own claim) also contains that substring. Callers whose
 # backgrounded process is a bash subshell of the SAME script (bluetooth.sh,
-# crash_logger.sh, deauth.sh, sniff.sh, tracer.sh, usb_monitor.sh,
+# crash_logger.sh, deauth.sh, sniff.sh, tracer.sh,
 # PayloadRunner.sh) pass their own script/payload name; webui.sh is the one
 # exception - its background launch `exec`s straight into python3, so its
 # real cmdline shows "server.py", not "webui.sh", and it passes that

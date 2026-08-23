@@ -1440,24 +1440,6 @@ fi
 WATCHDOG_PIDFILE="/tmp/pager-sniff-watchdog.pid"
 BRIDGE_STARTED_FILE="/tmp/pager-sniff-bridge-started"
 
-# USB_A_STATEFILE - INTEGRATION FIX (cross-file trace, tonight's independent
-# usb_monitor.sh edits): usb_monitor.sh has published this file on every
-# USB-A attach/detach transition (see its own USB_A_STATEFILE comment) since
-# earlier tonight, but a full grep across every script in this toolkit
-# turned up NOTHING that ever read it - it was a "future capability" nobody
-# had wired up yet, not a bug in usb_monitor.sh itself (its own comment is
-# explicit that it doesn't know or care who, if anyone, consumes it). Same
-# path as usb_monitor.sh's own USB_A_STATEFILE constant - kept in sync by
-# hand since it's a plain path string, not something worth a shared
-# lib/common.sh constant for a single reader/single writer pair.
-# start_lan_watchdog() below is the one place in this file that already asks
-# almost exactly the question usb_monitor.sh answers here (is BR_IFACE2 -
-# the USB-A member - still physically present), so it's the natural first
-# consumer: a fast-path hint only, see its own comment at the point of use
-# for why this can never change what the watchdog decides, only how soon it
-# decides it.
-USB_A_STATEFILE="/tmp/pager-usb-a-state"
-
 # BIG CHANGE (real feature, asked for directly - "keep the sniffing while
 # keeping ssh... over the LAN"): --bridge's whole premise up to now was
 # "the Pager becomes an invisible tap - it has no address of its own on
@@ -1593,22 +1575,9 @@ stop_bridge_dhcp() {
 MAX_BRIDGE_SECS="${PAGER_MAX_BRIDGE_SECS:-3600}"
 
 # WATCHDOG_POLL_INTERVAL_SECS - how often (5s) start_lan_watchdog's loop
-# re-checks bridge-member presence/MAX_BRIDGE_SECS/canonicalize_lan_
-# topology, once per full pass through its 1s-at-a-time USB_A_STATEFILE
-# wait (see that loop's own comment for why it's split into 1s ticks
-# instead of one bare `sleep 5` - unchanged here, still the same total
-# wait). Pulled up from an inline `-lt 5` loop-bound literal to a named
-# constant, same value, no behavior change.
+# re-checks bridge-member presence / MAX_BRIDGE_SECS / canonicalize_lan_
+# topology.
 WATCHDOG_POLL_INTERVAL_SECS=5
-
-# USB_A_HINT_STALE_SECS - how old (6s) a USB_A_STATEFILE "detached"
-# transition is allowed to be before start_lan_watchdog's fast-path hint
-# stops trusting it as fresh - see USB_A_STATEFILE's own comment above:
-# usb_monitor.sh's own poll loop is 2s, so anything staler than a few
-# cycles of that means it either isn't running right now or hasn't written
-# since before this wait even started. Pulled up from an inline `-le 6`
-# literal to a named constant, same value, no behavior change.
-USB_A_HINT_STALE_SECS=6
 
 # WATCHDOG_MEMBER_RETRY_COUNT - number of extra 1s-apart retries (2)
 # start_lan_watchdog gives a bridge member's sysfs presence check before
@@ -1702,68 +1671,7 @@ start_lan_watchdog() {
             *) _deadline=$((_start_ts + MAX_BRIDGE_SECS)) ;;
         esac
         while :; do
-            # USB_A_STATEFILE fast-path hint (see this constant's own
-            # comment near the top of this file for the full integration
-            # story - grepping every script in this toolkit confirmed
-            # nothing consumed usb_monitor.sh's published statefile before
-            # this). Strictly additive: this loop still just sleeps a flat
-            # 5s between checks by default (5 x `sleep 1` below, the exact
-            # same total wait as the old bare `sleep 5`), and falls through
-            # to the SAME sysfs-based member-presence check further down
-            # either way - that check alone still decides whether anything
-            # actually gets torn down, never this hint. The only thing this
-            # adds: if usb_monitor.sh's own independent ~2s-cadence poller
-            # has ALREADY published a FRESH "detached" transition for USB-A
-            # sometime during this wait, stop sitting out the rest of the 5s
-            # and go check right now instead - up to ~4s faster reaction to
-            # exactly the event the member-presence check below exists to
-            # catch. A statefile that's missing, unreadable, stale (over 6s
-            # old - usb_monitor.sh's own loop is 2s, so anything staler than
-            # that means it either isn't running right now or hasn't written
-            # since before this wait even started), or says anything other
-            # than "detached" leaves this loop behaving exactly as it did
-            # before this change - no new failure mode, just a possible
-            # early wake-up when the hint is fresh and relevant.
-            _usb_a_hint=0
-            _slept=0
-            while [ "$_slept" -lt "$WATCHDOG_POLL_INTERVAL_SECS" ]; do
-                sleep 1
-                _slept=$((_slept + 1))
-                # PERFORMANCE FIX (measured, not guessed - see standalone
-                # repro this pass: 300 iterations of `$(cat file)` took
-                # ~17.8s vs ~0.1s for 300 iterations of a plain builtin
-                # `read` against the same file, ~150x apart per call on this
-                # dev machine - forking `cat` is real, avoidable overhead
-                # here, not just theoretical). This line runs on EVERY 1s
-                # tick of this loop (up to WATCHDOG_POLL_INTERVAL_SECS times
-                # per outer 5s watchdog cycle) for as long as any --bridge
-                # session is up (up to MAX_BRIDGE_SECS, an hour by default) -
-                # in the common case (USB_A_STATEFILE exists and is
-                # readable, true almost the entire time usb_monitor.sh is
-                # running) the old `$(cat ...)` forked an external `cat`
-                # process on every single one of those ticks just to read a
-                # one-line, few-byte statefile - up to ~3600 avoidable forks
-                # over one hour-long bridge session, for a value `read` (a
-                # bash builtin, no fork at all) reads identically. Behavior
-                # is unchanged: usb_monitor.sh always writes a single
-                # `printf '%s\n' "$usb_a_pub"` line (see its own publish
-                # site), so a plain `read -r` captures the exact same text
-                # `cat` would have, and an unreadable/missing file still
-                # leaves _usb_a_val empty (not "detached") exactly like the
-                # old `[ -r ... ] &&` guard did.
-                _usb_a_val=""
-                [ -r "$USB_A_STATEFILE" ] && IFS= read -r _usb_a_val < "$USB_A_STATEFILE" 2>/dev/null
-                if [ "$_usb_a_val" = "detached" ]; then
-                    _st_mtime=$(date -r "$USB_A_STATEFILE" +%s 2>/dev/null)
-                    _st_now=$(date +%s 2>/dev/null)
-                    case "$_st_mtime" in ''|*[!0-9]*) _st_mtime="" ;; esac
-                    case "$_st_now" in ''|*[!0-9]*) _st_now="" ;; esac
-                    if [ -n "$_st_mtime" ] && [ -n "$_st_now" ] && [ "$_st_now" -ge "$_st_mtime" ] && [ $((_st_now - _st_mtime)) -le "$USB_A_HINT_STALE_SECS" ]; then
-                        _usb_a_hint=1
-                        break
-                    fi
-                fi
-            done
+            sleep "$WATCHDOG_POLL_INTERVAL_SECS"
             # MAX_BRIDGE_SECS enforcement (see header above this function)
             # - checked BEFORE the normal per-cycle recovery check below,
             # so a bridge that's simply overstayed its welcome gets torn
@@ -1910,9 +1818,7 @@ start_lan_watchdog() {
                 stop_bridge_dhcp
                 ip_link set "$BRIDGE_NAME" down 2>/dev/null
                 ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
-                _hint_note=""
-                [ "$_usb_a_hint" = "1" ] && _hint_note=" (usb_monitor.sh statefile fast-path hint fired this cycle)"
-                topology_log "watchdog: bridge member(s) missing: $_missing_names (of $BR_IFACE1/$BR_IFACE2) - tore down $BRIDGE_NAME and restored eth0 to br-lan${_hint_note}"
+                topology_log "watchdog: bridge member(s) missing: $_missing_names (of $BR_IFACE1/$BR_IFACE2) - tore down $BRIDGE_NAME and restored eth0 to br-lan"
                 echo "[sniff.sh watchdog] Bridge member interface(s) $_missing_names disappeared - likely a USB adapter physically detached. Bridge torn down, eth0 restored to br-lan automatically (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
                 rm -f "$BRIDGE_STARTED_FILE" "$WATCHDOG_PIDFILE"
                 exit 0

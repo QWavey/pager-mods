@@ -168,15 +168,6 @@ if [ "$DO_ALL" = "1" ]; then
     DO_NETWORK=1; DO_WIFI=1; DO_BLUETOOTH=1; DO_PROCESSES=1
 fi
 
-# NOTE (asked for explicitly - "make sure things like the reset to
-# standards isnt killing it"): usb_monitor.sh is deliberately NOT in the
-# --stop loop below, and the killall calls only ever target "tcpdump"/
-# "l2ping" by exact name - usb_monitor.sh is a plain bash script with
-# neither name, so nothing in reset_processes can touch it even
-# accidentally. ensure_usb_monitor() at the very end of this script (see
-# below) is the actual positive guarantee - not just "nothing currently
-# happens to hit it", but "it's confirmed still running when this
-# finishes, restarted if it somehow isn't."
 reset_processes() {
     say "Stopping any running toolkit captures/attacks..."
     # BUG FOUND AND FIXED (CRITICAL): none of these per-script --stop calls
@@ -265,7 +256,7 @@ reset_processes() {
     # background process in this toolkit already goes through
     # pid_running() with its own script name as NAME_PATTERN before ever
     # being killed (bluetooth.sh/crash_logger.sh/deauth.sh/sniff.sh/
-    # tracer.sh/usb_monitor.sh/PayloadRunner.sh - common.sh's own
+    # tracer.sh/PayloadRunner.sh - common.sh's own
     # pid_running() comment lists this exact watchdog's parent, sniff.sh,
     # among them) - this line was the one kill site in the whole toolkit
     # that still bypassed that guard, added after pid_running() was
@@ -583,20 +574,5 @@ progress_bar() {
 [ "$DO_PROCESSES" = "1" ] && { reset_processes; progress_bar; }
 [ "$DO_WIFI" = "1" ] && { reset_wifi; progress_bar; }
 [ "$DO_BLUETOOTH" = "1" ] && { reset_bluetooth; progress_bar; }
-
-# ensure_usb_monitor - the positive guarantee (asked for explicitly):
-# confirm usb_monitor.sh is still running after whatever this script just
-# did, and restart it if it somehow isn't (e.g. a --network reload is the
-# one action here that touches the network stack at all - if that ever
-# had a side effect on it, this catches and fixes it rather than leaving
-# the monitor silently dead). Skipped for --fast-restart/--reboot above
-# (both already `exit 0` before reaching here - a full reboot kills
-# everything by definition and there's nothing to "ensure" mid-reboot).
-if [ -x "$SCRIPT_DIR/usb_monitor.sh" ]; then
-    if ! "$SCRIPT_DIR/usb_monitor.sh" --status 2>&1 | grep -q Running; then
-        "$SCRIPT_DIR/usb_monitor.sh" --background >/dev/null 2>&1
-        say "usb_monitor.sh had stopped - restarted it."
-    fi
-fi
 
 say "Reset complete."
