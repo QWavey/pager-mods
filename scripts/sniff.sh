@@ -357,6 +357,101 @@ CREDS_PATTERN='authorization: basic|authorization: bearer|(^|[?&])(pass|passwd|p
 # capture before falling back to a bounded snapshot.
 MAX_SUMMARY_SCAN_BYTES=26214400
 
+# extract_src_ips - reads tcpdump -nn output on stdin, prints one source
+# address per line (the token right before " > "), with any appended
+# ":port"/".port" stripped - one address per input line, unsorted/
+# uncounted (summarize_pcap's own "Top source IPs" section pipes this
+# into sort | uniq -c | sort -rn | awk 'NR<=10{...}' for the ranked report;
+# kept
+# as a separate, pure, sample-input-testable function rather than inlined
+# there so this exact address/port-stripping logic - including the two
+# BUG FOUND AND FIXED cases below - can be exercised with synthetic input
+# in scripts/tests/, not just against a real capture).
+#
+# BUG FOUND AND FIXED (live-caught): the old pattern unconditionally
+# stripped a trailing ".NUMBER" assuming it was always a port - but
+# protocols with no port (ICMP: "IP 172.16.52.1 > ...", no port at
+# all) still have exactly 4 dot-separated numbers, and the regex's
+# greedy match happily treated the real last OCTET as if it were a
+# port and stripped it - confirmed live: a real ICMP packet from
+# 172.16.52.1 was reported as source "172.16.52" (3 octets, wrong).
+# Only strip a trailing number now if what's left AFTER stripping
+# still has a genuine 4-octet IPv4 address underneath it (i.e. there
+# really was a 5th, port, component) - a bare 4-octet address (ICMP)
+# is left exactly as captured.
+extract_src_ips() {
+    awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == ">") {
+                    ip = $(i - 1)
+                    if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) sub(/\.[0-9]+$/, "", ip)
+                    # BUG FOUND AND FIXED: the IPv4 fix above only strips a
+                    # trailing ".port" when what is left is a genuine
+                    # 4-octet address - but tcpdump appends a port the SAME
+                    # way for IPv6 (e.g. "fe80::1.12345"), and that never
+                    # matches the all-digits IPv4 regex, so the port was
+                    # never stripped there. Same two hosts talking on
+                    # different ports then counted as different "IPs" in
+                    # the ranking below, diluting the real top talker.
+                    # IPv6 addresses always contain ":" and never contain
+                    # a literal "." of their own (no IPv4-mapped forms seen
+                    # in this device tcpdump output) - a colon plus a
+                    # trailing ".NUMBER" is unambiguously an appended port.
+                    else if (ip ~ /:/ && ip ~ /\.[0-9]+$/) sub(/\.[0-9]+$/, "", ip)
+                    print ip
+                    break
+                }
+            }
+        }'
+}
+
+# classify_protocols - reads tcpdump -nn output on stdin, prints one
+# classified protocol name (ARP/ICMP/STP/TCP/DNS/UDP/OTHER-IP) per input
+# line - one classification per line, unsorted/uncounted (summarize_pcap's
+# own "Protocols seen" section pipes this into sort | uniq -c | sort -rn
+# for the ranked report). Pulled out as its own pure, sample-input-
+# testable function for the same reason as extract_src_ips above.
+#
+# tcpdump's default text output rarely contains the literal words "TCP"
+# or "DNS" - it shows "Flags [S]" for TCP and query markers like "A?"
+# for DNS instead. Classify by those actual markers (verified against
+# real tcpdump output samples), not by literal protocol-name grepping.
+# BUG FOUND AND FIXED (verified with a standalone awk test against a
+# real tcpdump line format, not assumed): an STP (Spanning Tree
+# Protocol, 802.1d) BPDU - real, documented tcpdump output looks like
+# "STP 802.1d, Config, Flags [none], bridge-id 8000.<mac>.8003, length
+# 43" (confirmed against tcpdump's own test fixtures/real capture
+# reports) - was silently miscounted as "TCP" here, because the SAME
+# `/Flags \[/` pattern meant to catch TCP's "Flags [S]"/"Flags [P.]"
+# also matches STP's unrelated "Flags [none]" field, and the TCP rule
+# ran before anything STP-specific could catch it first. Reproduced
+# standalone: feeding a synthetic NN_DUMP containing one real STP BPDU
+# line plus one real TCP SYN line through this exact awk script
+# classified BOTH as "TCP" (2 total), not 1 TCP + 1 STP. Directly
+# reachable in this tool's own primary use case, not just theoretical:
+# --bridge builds a real transparent Ethernet tap (br-sniff) between
+# two NICs specifically so traffic actually flows through it, and any
+# switch on either side of that tap sending periodic STP BPDUs (a very
+# ordinary, common thing switches do) would show up captured on
+# br-sniff/eth1 and get folded into the TCP count, corrupting the one
+# summary this tool exists to give an accurate, immediate report from.
+# Added a dedicated STP rule (matched the same "timestamp then keyword"
+# structural style already used by the OTHER-IP rule below) ahead of
+# the Flags-based TCP rule, so a real STP frame is classified correctly
+# and no longer inflates the TCP bucket.
+classify_protocols() {
+    awk '
+        /ARP,/ { print "ARP"; next }
+        /ICMP/ { print "ICMP"; next }
+        /^[0-9:.]+ STP / { print "STP"; next }
+        /Flags \[/ { print "TCP"; next }
+        /[0-9]+\+? (A|AAAA|PTR|MX|TXT|CNAME|NS)\?/ { print "DNS"; next }
+        /: UDP,/ { print "UDP"; next }
+        /^[0-9:.]+ IP6? / { print "OTHER-IP"; next }
+    '
+}
+
 summarize_pcap() {
     local file="$1"
     [ ! -s "$file" ] && { err "No/empty capture file: $file"; return 1; }
@@ -486,80 +581,26 @@ summarize_pcap() {
 
     echo
     echo "  Top source IPs:"
-    # BUG FOUND AND FIXED (live-caught): the old pattern unconditionally
-    # stripped a trailing ".NUMBER" assuming it was always a port - but
-    # protocols with no port (ICMP: "IP 172.16.52.1 > ...", no port at
-    # all) still have exactly 4 dot-separated numbers, and the regex's
-    # greedy match happily treated the real last OCTET as if it were a
-    # port and stripped it - confirmed live: a real ICMP packet from
-    # 172.16.52.1 was reported as source "172.16.52" (3 octets, wrong).
-    # Only strip a trailing number now if what's left AFTER stripping
-    # still has a genuine 4-octet IPv4 address underneath it (i.e. there
-    # really was a 5th, port, component) - a bare 4-octet address (ICMP)
-    # is left exactly as captured.
-    echo "$NN_DUMP" | awk '
-        {
-            for (i = 1; i <= NF; i++) {
-                if ($i == ">") {
-                    ip = $(i - 1)
-                    if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) sub(/\.[0-9]+$/, "", ip)
-                    # BUG FOUND AND FIXED: the IPv4 fix above only strips a
-                    # trailing ".port" when what is left is a genuine
-                    # 4-octet address - but tcpdump appends a port the SAME
-                    # way for IPv6 (e.g. "fe80::1.12345"), and that never
-                    # matches the all-digits IPv4 regex, so the port was
-                    # never stripped there. Same two hosts talking on
-                    # different ports then counted as different "IPs" in
-                    # the ranking below, diluting the real top talker.
-                    # IPv6 addresses always contain ":" and never contain
-                    # a literal "." of their own (no IPv4-mapped forms seen
-                    # in this device tcpdump output) - a colon plus a
-                    # trailing ".NUMBER" is unambiguously an appended port.
-                    else if (ip ~ /:/ && ip ~ /\.[0-9]+$/) sub(/\.[0-9]+$/, "", ip)
-                    print ip
-                    break
-                }
-            }
-        }' | sort | uniq -c | sort -rn | head -10 | awk '{printf "    %6d  %s\n", $1, $2}'
+    # Address/port-stripping logic lives in extract_src_ips() above (kept
+    # as a standalone function so it can be unit-tested with synthetic
+    # input in scripts/tests/, independent of a real tcpdump run).
+    # PERFORMANCE FIX (verified with a standalone repro before applying -
+    # every case matched: fewer than 10 groups, exactly 10, more than 10,
+    # ties at the cutoff, and empty input): `head -10` followed immediately
+    # by an `awk` that already exists in this same pipeline is one process
+    # more than this needs - `awk 'NR<=10{...}'` does the identical
+    # first-10-records job itself, so folding it into the awk that was
+    # already there removes a subprocess spawn (fork+exec has real,
+    # non-trivial cost on this MIPS device) from this report's three
+    # ranked-list sections with no output change.
+    echo "$NN_DUMP" | extract_src_ips | sort | uniq -c | sort -rn | awk 'NR<=10{printf "    %6d  %s\n", $1, $2}'
 
     echo
     echo "  Protocols seen:"
-    # tcpdump's default text output rarely contains the literal words "TCP"
-    # or "DNS" - it shows "Flags [S]" for TCP and query markers like "A?"
-    # for DNS instead. Classify by those actual markers (verified against
-    # real tcpdump output samples), not by literal protocol-name grepping.
-    # BUG FOUND AND FIXED (verified with a standalone awk test against a
-    # real tcpdump line format, not assumed): an STP (Spanning Tree
-    # Protocol, 802.1d) BPDU - real, documented tcpdump output looks like
-    # "STP 802.1d, Config, Flags [none], bridge-id 8000.<mac>.8003, length
-    # 43" (confirmed against tcpdump's own test fixtures/real capture
-    # reports) - was silently miscounted as "TCP" here, because the SAME
-    # `/Flags \[/` pattern meant to catch TCP's "Flags [S]"/"Flags [P.]"
-    # also matches STP's unrelated "Flags [none]" field, and the TCP rule
-    # ran before anything STP-specific could catch it first. Reproduced
-    # standalone: feeding a synthetic NN_DUMP containing one real STP BPDU
-    # line plus one real TCP SYN line through this exact awk script
-    # classified BOTH as "TCP" (2 total), not 1 TCP + 1 STP. Directly
-    # reachable in this tool's own primary use case, not just theoretical:
-    # --bridge builds a real transparent Ethernet tap (br-sniff) between
-    # two NICs specifically so traffic actually flows through it, and any
-    # switch on either side of that tap sending periodic STP BPDUs (a very
-    # ordinary, common thing switches do) would show up captured on
-    # br-sniff/eth1 and get folded into the TCP count, corrupting the one
-    # summary this tool exists to give an accurate, immediate report from.
-    # Added a dedicated STP rule (matched the same "timestamp then keyword"
-    # structural style already used by the OTHER-IP rule below) ahead of
-    # the Flags-based TCP rule, so a real STP frame is classified correctly
-    # and no longer inflates the TCP bucket.
-    echo "$NN_DUMP" | awk '
-        /ARP,/ { print "ARP"; next }
-        /ICMP/ { print "ICMP"; next }
-        /^[0-9:.]+ STP / { print "STP"; next }
-        /Flags \[/ { print "TCP"; next }
-        /[0-9]+\+? (A|AAAA|PTR|MX|TXT|CNAME|NS)\?/ { print "DNS"; next }
-        /: UDP,/ { print "UDP"; next }
-        /^[0-9:.]+ IP6? / { print "OTHER-IP"; next }
-    ' | sort | uniq -c | sort -rn | awk '{printf "    %6d  %s\n", $1, $2}'
+    # Classification logic lives in classify_protocols() above (kept as a
+    # standalone function so it can be unit-tested with synthetic input in
+    # scripts/tests/, independent of a real tcpdump run).
+    echo "$NN_DUMP" | classify_protocols | sort | uniq -c | sort -rn | awk '{printf "    %6d  %s\n", $1, $2}'
 
     echo
     echo "  HTTP Host headers seen (plaintext - real sites/services visited):"
@@ -570,7 +611,10 @@ summarize_pcap() {
     # capture window at all).
     host_hits=$(echo "$A_DUMP" | grep -oiE '^host: [^ ]+' | awk '{print $2}' | tr -d '\r')
     if [ -n "$host_hits" ]; then
-        echo "$host_hits" | sort | uniq -c | sort -rn | head -10 | awk '{printf "    %6d  %s\n", $1, $2}'
+        # PERFORMANCE FIX: same `head -10` + separate `awk` merge as the
+        # "Top source IPs" section above - see its own comment for the
+        # standalone-repro verification this was checked against.
+        echo "$host_hits" | sort | uniq -c | sort -rn | awk 'NR<=10{printf "    %6d  %s\n", $1, $2}'
     else
         echo "    none seen (no plaintext HTTP, or it's all HTTPS/encrypted)"
     fi
@@ -586,9 +630,12 @@ summarize_pcap() {
     # trailing "(NN)" length marker.
     dns_query_lines=$(echo "$NN_DUMP" | grep -E '[0-9]+\+? (A|AAAA|PTR|MX|TXT|CNAME|NS)\? ')
     if [ -n "$dns_query_lines" ]; then
+        # PERFORMANCE FIX: same `head -10` + separate `awk` merge as the
+        # "Top source IPs" section above - see its own comment for the
+        # standalone-repro verification this was checked against.
         echo "$dns_query_lines" | \
             grep -oE '(A|AAAA|PTR|MX|TXT|CNAME|NS)\? [^ ]+\.' | awk '{print $2}' | sed 's/\.$//' | \
-            sort | uniq -c | sort -rn | head -10 | awk '{printf "    %6d  %s\n", $1, $2}'
+            sort | uniq -c | sort -rn | awk 'NR<=10{printf "    %6d  %s\n", $1, $2}'
     else
         echo "    none seen"
     fi
@@ -1132,6 +1179,55 @@ fi
 # cmdline whether or not `timeout` wraps it.
 is_running() { pid_running "$PIDFILE" "tcpdump"; }
 
+# kill_tracked_pid PIDFILE PATTERN - shared "guard against PID reuse, then
+# kill and forget" primitive for every place this script tracks a
+# background subshell/process it may need to stop later: the --stop
+# watcher/feed cleanup below, and all three WATCHDOG_PIDFILE kill sites
+# (start_lan_watchdog's own "kill any pre-existing watchdog first" guard,
+# stop_lan_watchdog, and --unbridge). This was five independent copies of
+# the identical `[ -f pidfile ] && pid_running pidfile pattern && kill ...;
+# rm -f pidfile` sequence before this cleanup pass - each one added
+# separately, tonight, as the same PID-reuse gap kept getting rediscovered
+# at a new call site (see pid_running()'s own header in lib/common.sh for
+# why a bare `kill "$(cat pidfile)"` isn't safe on its own: the PID may
+# have been reused by an unrelated process since the file was written).
+# One definition now instead of five that could each drift independently.
+# Always removes the pidfile after, whether or not a live matching process
+# was actually found - same "stale/missing pidfile is a harmless no-op"
+# behavior every original call site already had via its own `[ -f ... ]`
+# guard (pid_running() itself also checks `-f`, so this is belt-and-braces
+# with what it already does, matching the original code's own redundancy
+# exactly rather than trimming it away as part of this refactor).
+kill_tracked_pid() {
+    local pidfile="$1" pattern="$2"
+    if [ -f "$pidfile" ]; then
+        pid_running "$pidfile" "$pattern" && kill "$(cat "$pidfile")" 2>/dev/null
+        rm -f "$pidfile"
+    fi
+}
+
+# reap_orphaned_tcpdump_rescans - kills any leftover `tcpdump ... -r ...`
+# process (the periodic re-scan run_creds_watcher/run_packet_feed each
+# spawn every cycle) left orphaned when its own watcher subshell got
+# killed mid-flight - the default (no trap set) behavior is the parent
+# dies immediately and the child keeps running as an orphan, the same
+# root cause as this toolkit's very first orphan-process bug this
+# session. Shared by both places this script kills those watcher
+# subshells (--stop below, and the foreground path right after
+# run_capture returns further down) - previously two identical copies of
+# this same loop, one per call site. Deliberately NOT a blanket `killall
+# tcpdump` - tracer.sh/pc_link.sh/a manual capture could have a live
+# `tcpdump -i ...` running at the same time and this must not touch
+# those. Matches specifically on "tcpdump ... -r" (a saved-file re-read -
+# never how any LIVE capture in this toolkit invokes tcpdump, which
+# always uses `-i IFACE -w FILE`), covering both the "-A -r" (creds/HTTP
+# watcher) and "-nn -r" (packet feed) forms.
+reap_orphaned_tcpdump_rescans() {
+    for _pid in $(ps 2>/dev/null | grep -E 'tcpdump .* -r ' | grep -v grep | awk '{print $1}'); do
+        kill "$_pid" 2>/dev/null
+    done
+}
+
 if [ "$DO_STATUS" = "1" ]; then
     if is_running; then
         say "Capture running (PID $(cat "$PIDFILE"))."
@@ -1162,41 +1258,17 @@ if [ "$DO_STOP" = "1" ]; then
     # to reliably notice from the inside. See the matching PID capture in
     # the --background launch block below.
     #
-    # BUG FOUND AND FIXED (MINOR, same PID-reuse class as the WATCHDOG_
-    # PIDFILE fixes above - these two track run_creds_watcher/run_packet_
-    # feed's own subshell PIDs, which are the same kind of non-exec'd bash
-    # subshell of this script, so the same "$(cat pidfile)" blind kill had
-    # the same theoretical gap. Lower severity than the watchdog case (these
-    # subshells are far shorter-lived - minutes at most, not up to an hour -
-    # so the PID-reuse window is narrower still), but the fix is free, so
-    # applied for the same safety guarantee everywhere this pattern appears.
-    if [ -f "${PIDFILE}.watcher" ]; then
-        pid_running "${PIDFILE}.watcher" "sniff.sh" && kill "$(cat "${PIDFILE}.watcher")" 2>/dev/null
-        rm -f "${PIDFILE}.watcher"
-    fi
-    # Same PID-tracking fix, same reason, for run_packet_feed (the
-    # separate 2s "live spammy view" cadence added alongside the
-    # credential/HTTP watcher above).
-    if [ -f "${PIDFILE}.feed" ]; then
-        pid_running "${PIDFILE}.feed" "sniff.sh" && kill "$(cat "${PIDFILE}.feed")" 2>/dev/null
-        rm -f "${PIDFILE}.feed"
-    fi
-    # Defense-in-depth: both watchers' periodic `tcpdump -r FILE`
-    # re-scans are reached through a command-substitution subshell - if
-    # the watcher's own PID gets killed WHILE a re-scan is mid-flight, the
-    # default (no trap set) behavior is the parent dies immediately and
-    # the child keeps running as an orphan, the same root cause as this
-    # toolkit's very first orphan-process bug this session. Unlike that
-    # fix, a blanket `killall tcpdump` isn't safe here - tracer.sh/
-    # pc_link.sh/a manual capture could have a live `tcpdump -i ...`
-    # running at the same time and this must not touch those. Match
-    # specifically on "tcpdump ... -r" (a saved-file re-read - never how
-    # any LIVE capture in this toolkit invokes tcpdump, which always uses
-    # `-i IFACE -w FILE`) so only a genuinely orphaned re-scan gets caught,
-    # covering both the "-A -r" (creds/HTTP) and "-nn -r" (packet feed) forms.
-    for _pid in $(ps 2>/dev/null | grep -E 'tcpdump .* -r ' | grep -v grep | awk '{print $1}'); do
-        kill "$_pid" 2>/dev/null
-    done
+    # Same PID-reuse-guarded kill as WATCHDOG_PIDFILE below (see
+    # kill_tracked_pid()'s own header) - these two track run_creds_watcher/
+    # run_packet_feed's own subshell PIDs, the same kind of non-exec'd bash
+    # subshell of this script, so they need the same "sniff.sh" pattern.
+    kill_tracked_pid "${PIDFILE}.watcher" "sniff.sh"
+    kill_tracked_pid "${PIDFILE}.feed" "sniff.sh"
+    # Defense-in-depth - see reap_orphaned_tcpdump_rescans()'s own header
+    # (up near is_running()/kill_tracked_pid()) for why this is needed:
+    # both watchers' periodic `tcpdump -r FILE` re-scans can be orphaned
+    # by the kills just above.
+    reap_orphaned_tcpdump_rescans
     exit 0
 fi
 
@@ -1214,6 +1286,24 @@ fi
 # --bridge, stopped on --unbridge.
 WATCHDOG_PIDFILE="/tmp/pager-sniff-watchdog.pid"
 BRIDGE_STARTED_FILE="/tmp/pager-sniff-bridge-started"
+
+# USB_A_STATEFILE - INTEGRATION FIX (cross-file trace, tonight's independent
+# usb_monitor.sh edits): usb_monitor.sh has published this file on every
+# USB-A attach/detach transition (see its own USB_A_STATEFILE comment) since
+# earlier tonight, but a full grep across every script in this toolkit
+# turned up NOTHING that ever read it - it was a "future capability" nobody
+# had wired up yet, not a bug in usb_monitor.sh itself (its own comment is
+# explicit that it doesn't know or care who, if anyone, consumes it). Same
+# path as usb_monitor.sh's own USB_A_STATEFILE constant - kept in sync by
+# hand since it's a plain path string, not something worth a shared
+# lib/common.sh constant for a single reader/single writer pair.
+# start_lan_watchdog() below is the one place in this file that already asks
+# almost exactly the question usb_monitor.sh answers here (is BR_IFACE2 -
+# the USB-A member - still physically present), so it's the natural first
+# consumer: a fast-path hint only, see its own comment at the point of use
+# for why this can never change what the watchdog decides, only how soon it
+# decides it.
+USB_A_STATEFILE="/tmp/pager-usb-a-state"
 
 # BIG CHANGE (real feature, asked for directly - "keep the sniffing while
 # keeping ssh... over the LAN"): --bridge's whole premise up to now was
@@ -1352,33 +1442,17 @@ start_lan_watchdog() {
     # time. Kill and clear any existing watchdog first, every time, so at
     # most one can ever be alive.
     #
-    # BUG FOUND AND FIXED (MAJOR, PID-reuse risk in this exact "kill first"
-    # fix as originally written): a bare `kill "$(cat "$WATCHDOG_PIDFILE")"`
-    # trusts the pidfile's number completely - it never confirms the PID it's
-    # about to kill is actually still the watchdog subshell that wrote it.
-    # If that subshell died some other way (crash, an out-of-band `kill -9`,
-    # anything that skips this file's own cleanup) and this device's PID
-    # counter later reused that exact number for a totally unrelated process
-    # (sshd, a cron job, anything else) before the next --bridge ran, this
-    # would kill that unrelated process instead - the identical PID-reuse
-    # class of bug pid_running() in lib/common.sh was already hardened
-    # against (see its own header) for is_running()'s "tcpdump" check, just
-    # never carried over to this brand-new call site. Routed through
-    # pid_running() with the "sniff.sh" NAME_PATTERN instead - the watchdog
-    # is a plain (non-exec'd) bash subshell of this same script, so its real
-    # /proc/PID/cmdline still contains "sniff.sh" the same way it does for
-    # every other subshell-style background process this file tracks (see
-    # pid_running()'s own comment for the full list). This also directly
-    # covers the "stale/garbage/missing pidfile" cases asked about: a
-    # missing file is already handled by the `[ -f ... ]` guard; a
-    # nonexistent PID or one that plainly isn't ours now makes pid_running()
-    # return false, so the kill is skipped entirely and only the stale
-    # pidfile itself is cleaned up - never a blind kill of whatever that
-    # number currently happens to point at.
-    if [ -f "$WATCHDOG_PIDFILE" ]; then
-        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
-        rm -f "$WATCHDOG_PIDFILE"
-    fi
+    # PID-reuse-guarded kill (see kill_tracked_pid()'s own header, up near
+    # is_running(), for the full reasoning): a bare `kill "$(cat pidfile)"`
+    # would trust the pidfile's number completely, with no confirmation the
+    # PID it's about to kill is actually still the watchdog subshell that
+    # wrote it - a real risk if that subshell died out-of-band (crash, an
+    # external `kill -9`) and this device's PID counter later reused the
+    # number for an unrelated process before the next --bridge ran. This
+    # also covers the "stale/garbage/missing pidfile" cases: a missing file
+    # is a no-op; a PID that plainly isn't a "sniff.sh" subshell is left
+    # alone (only its stale pidfile gets cleaned up), never blind-killed.
+    kill_tracked_pid "$WATCHDOG_PIDFILE" "sniff.sh"
     # BUG FOUND AND FIXED (edge case, verified with a standalone test before
     # applying here): the `|| echo 0` fallback below meant a `date +%s`
     # failure at exactly this moment (the ONE time it's read to compute the
@@ -1417,7 +1491,44 @@ start_lan_watchdog() {
             *) _deadline=$((_start_ts + MAX_BRIDGE_SECS)) ;;
         esac
         while :; do
-            sleep 5
+            # USB_A_STATEFILE fast-path hint (see this constant's own
+            # comment near the top of this file for the full integration
+            # story - grepping every script in this toolkit confirmed
+            # nothing consumed usb_monitor.sh's published statefile before
+            # this). Strictly additive: this loop still just sleeps a flat
+            # 5s between checks by default (5 x `sleep 1` below, the exact
+            # same total wait as the old bare `sleep 5`), and falls through
+            # to the SAME sysfs-based member-presence check further down
+            # either way - that check alone still decides whether anything
+            # actually gets torn down, never this hint. The only thing this
+            # adds: if usb_monitor.sh's own independent ~2s-cadence poller
+            # has ALREADY published a FRESH "detached" transition for USB-A
+            # sometime during this wait, stop sitting out the rest of the 5s
+            # and go check right now instead - up to ~4s faster reaction to
+            # exactly the event the member-presence check below exists to
+            # catch. A statefile that's missing, unreadable, stale (over 6s
+            # old - usb_monitor.sh's own loop is 2s, so anything staler than
+            # that means it either isn't running right now or hasn't written
+            # since before this wait even started), or says anything other
+            # than "detached" leaves this loop behaving exactly as it did
+            # before this change - no new failure mode, just a possible
+            # early wake-up when the hint is fresh and relevant.
+            _usb_a_hint=0
+            _slept=0
+            while [ "$_slept" -lt 5 ]; do
+                sleep 1
+                _slept=$((_slept + 1))
+                if [ -r "$USB_A_STATEFILE" ] && [ "$(cat "$USB_A_STATEFILE" 2>/dev/null)" = "detached" ]; then
+                    _st_mtime=$(date -r "$USB_A_STATEFILE" +%s 2>/dev/null)
+                    _st_now=$(date +%s 2>/dev/null)
+                    case "$_st_mtime" in ''|*[!0-9]*) _st_mtime="" ;; esac
+                    case "$_st_now" in ''|*[!0-9]*) _st_now="" ;; esac
+                    if [ -n "$_st_mtime" ] && [ -n "$_st_now" ] && [ "$_st_now" -ge "$_st_mtime" ] && [ $((_st_now - _st_mtime)) -le 6 ]; then
+                        _usb_a_hint=1
+                        break
+                    fi
+                fi
+            done
             # MAX_BRIDGE_SECS enforcement (see header above this function)
             # - checked BEFORE the normal per-cycle recovery check below,
             # so a bridge that's simply overstayed its welcome gets torn
@@ -1564,7 +1675,9 @@ start_lan_watchdog() {
                 stop_bridge_dhcp
                 ip_link set "$BRIDGE_NAME" down 2>/dev/null
                 ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
-                topology_log "watchdog: bridge member(s) missing: $_missing_names (of $BR_IFACE1/$BR_IFACE2) - tore down $BRIDGE_NAME and restored eth0 to br-lan"
+                _hint_note=""
+                [ "$_usb_a_hint" = "1" ] && _hint_note=" (usb_monitor.sh statefile fast-path hint fired this cycle)"
+                topology_log "watchdog: bridge member(s) missing: $_missing_names (of $BR_IFACE1/$BR_IFACE2) - tore down $BRIDGE_NAME and restored eth0 to br-lan${_hint_note}"
                 echo "[sniff.sh watchdog] Bridge member interface(s) $_missing_names disappeared - likely a USB adapter physically detached. Bridge torn down, eth0 restored to br-lan automatically (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
                 rm -f "$BRIDGE_STARTED_FILE" "$WATCHDOG_PIDFILE"
                 exit 0
@@ -1587,15 +1700,9 @@ start_lan_watchdog() {
 }
 
 stop_lan_watchdog() {
-    # BUG FOUND AND FIXED (MAJOR, same PID-reuse gap as start_lan_watchdog's
-    # own "kill existing first" fix above, same call pattern, never carried
-    # over here): a bare kill on whatever WATCHDOG_PIDFILE currently
-    # contains, with no confirmation it's still genuinely the watchdog
-    # subshell. Same pid_running()+"sniff.sh" guard as the other fix.
-    if [ -f "$WATCHDOG_PIDFILE" ]; then
-        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
-        rm -f "$WATCHDOG_PIDFILE"
-    fi
+    # Same PID-reuse-guarded kill as start_lan_watchdog's own "kill existing
+    # first" guard above - see kill_tracked_pid()'s header near is_running().
+    kill_tracked_pid "$WATCHDOG_PIDFILE" "sniff.sh"
     rm -f "$BRIDGE_STARTED_FILE"
     # BUG FOUND AND FIXED (CRITICAL, second half of the same live-caught
     # incident as --unbridge's own reordering fix below): stop_bridge_dhcp()
@@ -1626,13 +1733,9 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
     # split matters: releasing the DHCP lease can remove br-sniff's own
     # address, which would sever a session connected through it before
     # eth0 is safely back in br-lan).
-    # BUG FOUND AND FIXED (MAJOR, same PID-reuse gap as the other two
-    # WATCHDOG_PIDFILE kill sites in this file - third copy of the same
-    # unguarded pattern, same fix).
-    if [ -f "$WATCHDOG_PIDFILE" ]; then
-        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
-        rm -f "$WATCHDOG_PIDFILE"
-    fi
+    # Same PID-reuse-guarded kill as the other two WATCHDOG_PIDFILE kill
+    # sites - see kill_tracked_pid()'s header near is_running().
+    kill_tracked_pid "$WATCHDOG_PIDFILE" "sniff.sh"
     rm -f "$BRIDGE_STARTED_FILE"
     # BUG FOUND AND FIXED (CRITICAL, live-caught the hard way - this is
     # exactly what left a real device unreachable at BOTH addresses,
@@ -2055,21 +2158,11 @@ run_capture
 CAP_RC=$?
 kill "$CREDS_WATCHER_PID" 2>/dev/null
 kill "$PACKET_FEED_PID" 2>/dev/null
-# BUG FOUND AND FIXED (found via code review): the --stop handler above
-# already documents and defends against exactly this - killing a watcher
-# subshell PID while it's mid-flight inside its own `tcpdump -A/-nn -r`
-# command-substitution can orphan that re-scan (parent dies immediately,
-# no trap, child reparented and keeps running) - but that defense-in-depth
-# sweep only ran in the --background/--stop path. A FOREGROUND run hits
-# the identical two `kill`s right above with no equivalent follow-up, so
-# the same orphan risk existed here too, just via a code path the
-# original fix didn't cover. Same targeted match as --stop (only
-# "tcpdump ... -r ", never how a live capture's own `-i IFACE -w FILE`
-# invocation looks) so a genuine tracer.sh/pc_link.sh capture running
-# concurrently is never touched.
-for _pid in $(ps 2>/dev/null | grep -E 'tcpdump .* -r ' | grep -v grep | awk '{print $1}'); do
-    kill "$_pid" 2>/dev/null
-done
+# Same defense-in-depth as --stop above (see reap_orphaned_tcpdump_
+# rescans()'s own header up near is_running()/kill_tracked_pid()) - a
+# FOREGROUND run hits the identical two `kill`s just above, so it needs
+# the identical orphan cleanup.
+reap_orphaned_tcpdump_rescans
 
 # BUG FOUND AND FIXED (CRITICAL - silent failure, verified with a standalone
 # repro): run_capture's own exit status was never checked, and "Done. Saved

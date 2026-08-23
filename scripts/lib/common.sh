@@ -303,10 +303,68 @@ canonicalize_lan_topology() {
 
     case "$desired" in
         bridged)
-            if ip_link show "$bridge" >/dev/null 2>&1; then
-                return 0  # bridge present - presumably holding eth0, not this reconciler's job to touch it
+            # BUG FOUND AND FIXED (CRITICAL, same two gaps just found and
+            # fixed live in sniff.sh's OWN local watchdog tonight - this
+            # shared function was the one place that consolidation missed,
+            # and sniff.sh's own comments at its canonicalize_lan_topology
+            # call site (start_lan_watchdog(), lib/common.sh header for
+            # this exact case) explicitly flag it as still broken here):
+            #
+            # (1) This only ever checked whether $bridge (br-sniff) ITSELF
+            # still existed - never whether the interfaces actually bridged
+            # into it were still there. A --bridge session always joins
+            # exactly two interfaces to $bridge (see sniff.sh: "--bridge
+            # needs two DIFFERENT interface names ... bridging an interface
+            # to itself isn't a two-NIC tap") - a USB-A adapter physically
+            # detaching unregisters ITS netdev outright but leaves $bridge
+            # alive with one fewer port. The old check kept succeeding
+            # forever in that state, so the "bridge present - not this
+            # reconciler's job to touch it" fast path fired every single
+            # call with eth0 never restored to br-lan - for up to
+            # MAX_BRIDGE_SECS (an hour) or, for any caller not enforcing
+            # that ceiling, indefinitely. Fixed the same way sniff.sh's own
+            # copy was: count entries in /sys/class/net/$bridge/brif/ (the
+            # bridge's own port list) and require at least 2 before trusting
+            # the fast path - fewer than that means a member vanished, so
+            # fall through to the same eth0 repair path already used when
+            # the bridge is gone entirely.
+            #
+            # (2) The existence check itself used `ip_link show` - a plain
+            # netlink call, the EXACT class this file's own ip_link()
+            # wrapper (see its header above) documents as having wedged
+            # indefinitely on this device. A wedged/congested netlink socket
+            # would make `ip_link show "$bridge"` time out and return
+            # nonzero for a bridge that never actually went anywhere -
+            # indistinguishable, at this check, from a genuinely-torn-down
+            # bridge - which would then fall through and yank eth0 directly
+            # into br-lan out of an ACTIVELY, LEGITIMATELY running bridge
+            # session. That is precisely the "watchdog fights an active
+            # bridge" incident this whole reconciler was built to prevent
+            # (see this function's own header comment above). Every other
+            # existence check in this file (eth0_in_br_lan, detect_usb_a_iface,
+            # iface_has_carrier) already avoids `ip link`/`ip_link` for
+            # exactly this reason and reads /sys/class/net/ directly instead
+            # - switched this check to match, so a congested netlink socket
+            # can no longer masquerade as "the bridge is gone".
+            #
+            # Verified: `bash -n` after the edit, plus a standalone snippet
+            # test (fake /sys/class/net/<bridge>/brif/ with 0/1/2 entries)
+            # confirming the port-count gate returns "unhealthy" for 0 or 1
+            # and "healthy, don't touch" only at >=2, with no `ip`/`ip_link`
+            # call made at all for the existence half of the check.
+            if [ -e "/sys/class/net/$bridge" ]; then
+                local _port_count
+                _port_count=$(ls "/sys/class/net/$bridge/brif/" 2>/dev/null | wc -l)
+                case "$_port_count" in
+                    ''|*[!0-9]*) _port_count=0 ;;
+                esac
+                if [ "$_port_count" -ge 2 ]; then
+                    return 0  # bridge present with both members still attached - not this reconciler's job to touch it
+                fi
+                topology_log "reconciler: desired=bridged but '$bridge' has fewer than 2 members ($_port_count) - a member interface likely vanished - falling through to management repair"
+            else
+                topology_log "reconciler: desired=bridged but '$bridge' is gone - falling through to management repair"
             fi
-            topology_log "reconciler: desired=bridged but '$bridge' is gone - falling through to management repair"
             ;;
         management) : ;;
         *) topology_log "reconciler: unknown desired state '$desired' - refusing to guess"; return 1 ;;

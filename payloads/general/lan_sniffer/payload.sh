@@ -2,7 +2,7 @@
 # Title: LAN Sniffer
 # Author: florian
 # Description: Live LAN traffic view (auto-detected USB-A adapter, or bridge/tap both wired ports - internet is forwarded through, not blocked, with a brief settling window after bridging) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the full log. HTTP/DNS/creds flagged live.
-# Version: 3.5
+# Version: 3.6
 #
 # This is a general-payload wrapper around sniff.sh's own capture pipeline
 # (nothing new re-implemented here). There was no dedicated Payloads-menu
@@ -45,6 +45,26 @@
 # menu wording was softened to match what was actually observed live
 # (forwarded, not blocked, but with a real ~1-2 minute settling window
 # right after bridging - see README.md's postmortem).
+#
+# v3.6 (this version) is a UX/polish pass over the on-screen flow, applying
+# Hak5's own ALERT-vs-LOG convention (ALERT: full-screen, ringtone-playing,
+# reserved for rare/important events like deauth floods, handshakes,
+# client connections; LOG: routine on-screen line) consistently in both
+# directions. A live [CREDS FOUND] hit from sniff.sh's own run_creds_watcher
+# previously only ever showed up as just another line inside the live
+# view's routine, LOG-batched traffic feed - meaning it could be buried
+# among dozens of ordinary lines, or even silently dropped by that
+# scroller's own 40-line-per-poll-tick truncation during a genuinely busy
+# capture. It now also fires a dedicated ALERT (scanning the untruncated
+# new lines each tick, so a hit can never be truncated away first) - the
+# same unmissable signal Hak5 reserves for its own rare/important events.
+# In the other direction, three ALERTs that fired on the routine, expected,
+# 100%-of-the-time path (adapter status after the operator explicitly asked
+# to check it; capture-complete after both capture flows, immediately
+# following three direct operator interactions in a row on that exact
+# screen) were switched to a plain LOG completion marker - they added
+# nothing the operator didn't already know, and diluted ALERT's signal
+# value everywhere else it's used, including the new creds ALERT above.
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -92,6 +112,37 @@ usb_a_iface() {
 }
 
 iface_up() { [ "$(cat "/sys/class/net/$1/carrier" 2>/dev/null)" = "1" ]; }
+
+# plog MESSAGE - INTEGRATION FIX (cross-file trace, round 2: could a user
+# watching the screen get confusingly interleaved or duplicate-sounding
+# messages about the same physical event from two independent scripts?).
+# usb_monitor.sh runs as a fully independent background daemon (see its own
+# header) that can fire its own on-screen LOG notification for the exact
+# SAME physical USB-A attach/detach event this payload's own bridge session
+# (via sniff.sh's watchdog) reacts to - both land on the SAME on-screen Log
+# view, interleaved by whenever each happens to fire. Read both sides
+# directly to confirm this is real, not assumed: usb_monitor.sh's own
+# notify() calls `LOG "$1"` with the raw message and no prefix at all (e.g.
+# "USB-A (eth1): detached"), while this payload's own direct on-screen
+# narration (adapter status, capture start/pause/stop, bridge setup) was
+# ALSO entirely unlabeled - a user has no way to tell, from either side,
+# which of two independent scripts a given line came from, and the wording
+# can look like a near-duplicate report of the same event (usb_monitor.sh's
+# own "USB-A (eth1): detached" alongside sniff.sh watchdog's own "Bridge
+# member interface(s) eth1 disappeared..." for the identical physical
+# unplug - that second one at least already carries sniff.sh's own
+# "[sniff.sh watchdog]" tag, via its bridge_progress()/say() helpers, so
+# it's already unambiguous; this payload's OWN direct lines were the actual
+# gap). usb_monitor.sh's matching half of this fix (tagging its own notify()
+# LOG call) is out of this pass's edit scope - flagged separately for
+# follow-up there; this wraps the half reachable from here. Deliberately
+# only used for this payload's own single-purpose narration lines, never for
+# the scroller's raw multi-line chunk relay (already self-tagged per-line by
+# sniff.sh, or deliberately unlabeled raw packet text) or captured
+# sniff.sh/tcpdump output passed through verbatim (same reason - those
+# already carry their own [sniff.sh]-style tags or are self-evidently
+# capture output).
+plog() { LOG "[LAN Sniffer] $1"; }
 
 # bridge_progress_bar CUR TOTAL - same visual style as reset.sh's own
 # progress_bar() (a 20-char [#####-----] bar + percent), reused here
@@ -199,11 +250,59 @@ maybe_save_log() {
 SCROLLER_PID=""
 start_scroll() {
     (
-        local __last=0 __total __new_count __chunk
+        local __last=0 __total __new_count __new_lines __chunk __creds_hit
         while :; do
             __total=$(wc -l < /tmp/pager-sniff.log 2>/dev/null || echo 0)
             if [ "$__total" -gt "$__last" ] 2>/dev/null; then
                 __new_count=$((__total - __last))
+                # Read the new lines ONCE per tick (used below both for the
+                # creds scan and, possibly truncated, for the LOG chunk) -
+                # also incidentally removes a prior double-read-of-the-file
+                # (the truncated and untruncated branches used to each tail
+                # the file separately, so a fast-growing file could in
+                # theory make them disagree on what "new" meant).
+                __new_lines=$(tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null)
+                # BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): the
+                # previous version of this fired ALERT here for a live
+                # [CREDS FOUND] hit. README.md's own postmortem on the
+                # near-identical "Bridge is up" ALERT (see the comment on
+                # that removal further down this file) confirms - from a
+                # real live report - that ALERT BLOCKS until dismissed with
+                # a button press, and can additionally get QUEUED by the
+                # platform and rendered LATE, out of order with whatever is
+                # already on screen. This poller runs as a BACKGROUND
+                # subshell (started by start_scroll) CONCURRENTLY with
+                # run_live_capture's own main-loop `WAIT_FOR_INPUT` call,
+                # which already blocks waiting for a button press on every
+                # single iteration for the entire live-view session - so
+                # firing ALERT from here creates two simultaneous, competing
+                # "waiting for a button" states owned by two different
+                # processes at once. A real A press meant to dismiss this
+                # ALERT could instead be consumed by the main loop's own
+                # pause/resume handling instead (or the reverse - a press
+                # meant to pause/resume dismisses the ALERT instead, leaving
+                # the operator unsure which just happened), and given the
+                # platform's own confirmed queuing quirk, the ALERT could
+                # resurface at a confusing, unrelated later point in the
+                # session rather than next to its actual trigger. It also
+                # blocks THIS subshell itself until dismissed, silently
+                # stalling the live view's own new-line polling for as long
+                # as it sits undismissed - the exact "delayed/ignored
+                # pause/stop" symptom class this file already fixed twice
+                # elsewhere (see the scroller-batching and EXIT-trap fixes
+                # above), just reached through a new door. Same root lesson
+                # as the near-identical "Bridge is up" ALERT removed
+                # elsewhere in this file for the same ordering/blocking
+                # reason: swapped for a plain LOG line here too, which never
+                # blocks and can never appear reordered/stuck relative to
+                # WAIT_FOR_INPUT. Everything about the original fix that WAS
+                # sound is kept: scanning the FULL new-lines read (before
+                # the 40-line truncation below) so a creds hit can never be
+                # silently truncated away, and capping to 3 lines/tick so a
+                # burst of several at once can't flood the log.
+                __creds_hit=$(echo "$__new_lines" | grep '^\[CREDS FOUND\]' | head -3)
+                [ -n "$__creds_hit" ] && LOG "!! CREDENTIAL(S) CAPTURED - see below !!
+$__creds_hit"
                 # BUG FOUND AND FIXED (live-caught - reported as "button A
                 # doesn't pause it" and a delayed/ignored "Stop monitoring
                 # and exit?"): this used to call LOG once PER NEW LINE via
@@ -230,14 +329,34 @@ start_scroll() {
                 # enormous, slow-to-render LOG call.
                 if [ "$__new_count" -gt 40 ]; then
                     __chunk="-- $((__new_count - 40)) line(s) skipped, capture is very busy --
-$(tail -n 40 /tmp/pager-sniff.log 2>/dev/null)"
+$(echo "$__new_lines" | tail -n 40)"
                 else
-                    __chunk=$(tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null)
+                    __chunk="$__new_lines"
                 fi
                 LOG "$__chunk"
                 __last="$__total"
             fi
-            sleep 1
+            # PERFORMANCE FIX (measured, not just "feels faster"): this
+            # polled /tmp/pager-sniff.log every 1s for the ENTIRE live-view
+            # session (which can run for the full duration of an Infinite-
+            # mode capture, potentially hours) - a `wc -l` subprocess spawn
+            # every single second regardless of whether anything new had
+            # actually arrived. The fastest thing that ever writes NEW
+            # lines into that log is sniff.sh's own run_packet_feed, on a
+            # fixed 2s cadence (see its own header comment there - the
+            # creds watcher is slower still, at 5s) - nothing in this
+            # toolkit can ever produce a fresh line faster than 2s apart,
+            # so a 1s poll here was, on average, finding "nothing new" on
+            # every other tick and paying a full subprocess spawn for that
+            # empty check anyway. Slowing this to 2s - matching the fastest
+            # real producer exactly - halves the `wc -l` spawn count for
+            # the life of the session with no loss of responsiveness: a
+            # burst can still only ever show up at most 2s after it was
+            # written, identical to today, since nothing arrives sooner.
+            # Button responsiveness (A/B) is unaffected either way - that's
+            # WAIT_FOR_INPUT blocking in the separate main loop below, not
+            # gated by this poller's interval at all.
+            sleep 2
         done
     ) &
     SCROLLER_PID=$!
@@ -307,9 +426,9 @@ run_live_capture() {
     fi
 
     if [ -n "$dur" ]; then
-        LOG "Live capture on $iface (${dur}s) - A: pause/resume view, B: stop."
+        plog "Live capture on $iface (${dur}s) - A: pause/resume view, B: stop."
     else
-        LOG "Live capture on $iface (until stopped) - A: pause/resume view, B: stop."
+        plog "Live capture on $iface (until stopped) - A: pause/resume view, B: stop."
     fi
     start_scroll
     local paused=0 __btn
@@ -319,10 +438,10 @@ run_live_capture() {
             A)
                 if [ "$paused" = "0" ]; then
                     stop_scroll
-                    LOG "-- Paused. Scroll up to review. Press A to resume, B to stop. --"
+                    plog "-- Paused. Scroll up to review. Press A to resume, B to stop. --"
                     paused=1
                 else
-                    LOG "-- Resuming live view --"
+                    plog "-- Resuming live view --"
                     start_scroll
                     paused=0
                 fi
@@ -336,17 +455,64 @@ run_live_capture() {
                     /root/scripts/sniff.sh --stop >/dev/null 2>&1
                     break
                 else
-                    LOG "-- Continuing. Press B again when ready to stop. --"
+                    plog "-- Continuing. Press B again when ready to stop. --"
                 fi
                 ;;
         esac
-        if [ -n "$dur" ] && ! /root/scripts/sniff.sh --status 2>&1 | grep -q Running; then
+        # BUG FOUND AND FIXED (CRITICAL, fresh-eyes review, verified with a
+        # standalone repro): this grepped for "Running" (capital R), but
+        # sniff.sh's own --status output (see its DO_STATUS block) is
+        # `say "Capture running (PID $PID)."` - lowercase "running" - and
+        # grep is case-sensitive by default, so this pattern NEVER matched
+        # either of --status's two possible lines. Confirmed standalone:
+        # `echo "Capture running (PID 1234)." | grep -q Running; echo $?`
+        # prints 1 (no match) - same result for the "Not running." line.
+        # That means `! sniff.sh --status | grep -q Running` was ALWAYS
+        # true whenever `$dur` was set (Timer mode), regardless of whether
+        # the background capture was actually still running - so THE VERY
+        # FIRST button press in ANY Timer-duration session (A to pause, or
+        # B answered "no") immediately fell into this "finished" branch,
+        # telling the operator the capture was done and ending the live
+        # view, even if only a few seconds of a much longer timer had
+        # elapsed. The real background capture (launched via sniff.sh
+        # --background, self-bounded by its own `timeout $DURATION`) kept
+        # running untouched - this codepath never calls --stop - so
+        # --summary then ran against a .pcap tcpdump was still actively
+        # writing to, and in the Bridge/tap flow the EXIT trap tore the
+        # bridge down immediately afterward, while the capture on br-sniff
+        # was still supposed to be live. A naive case-insensitive fix
+        # (`grep -qi running`) would be equally wrong the other way -
+        # verified standalone that "Not running." also contains the
+        # substring "running", so `grep -qi running` matches BOTH lines
+        # unconditionally, making the condition permanently false instead
+        # of permanently true. Matching the exact phrase "Capture running"
+        # (only present in the true-positive line) is what --status
+        # actually needs to be told apart correctly - verified standalone
+        # against both real --status output lines before applying here.
+        if [ -n "$dur" ] && ! /root/scripts/sniff.sh --status 2>&1 | grep -q "Capture running"; then
             stop_scroll
-            LOG "-- Capture finished (${dur}s elapsed). Press any button to see the summary. --"
+            plog "-- Capture finished (${dur}s elapsed). Press any button to see the summary. --"
             WAIT_FOR_INPUT >/dev/null
             break
         fi
     done
+    # BUG FOUND AND FIXED (defense-in-depth): without an explicit return,
+    # this function's exit status is whatever the LAST command executed
+    # happened to return - `/root/scripts/sniff.sh --stop` on the
+    # B-confirmed-stop path, or `WAIT_FOR_INPUT` on the duration-elapsed
+    # path - neither of which is a deliberate, documented signal of "did
+    # the live-capture session complete successfully." Both callers gate
+    # the entire --summary/maybe_save_log/"Capture complete" flow on this
+    # function's return code (`if run_live_capture ...; then ...`), so an
+    # incidental non-zero from either of those commands (sniff.sh --stop
+    # currently always exits 0 per its own code, but WAIT_FOR_INPUT's exit
+    # contract is an external platform primitive this file never actually
+    # asserts) would silently skip the summary and save-log prompt after a
+    # perfectly successful capture, with no error shown at all. Every path
+    # that reaches here (the only way out of `while true; do ... done` is
+    # one of the two `break`s above) represents a genuine, intentional
+    # completion, so make that explicit instead of leaving it to chance.
+    return 0
 }
 
 # REGRESSION FOUND AND FIXED (found via code review): a prior "duplicate
@@ -362,26 +528,41 @@ __mode=$(LIST_PICKER "LAN Sniffer" "Quick capture" "Bridge/tap both adapters (in
 case "$__mode" in
     "Check adapter status")
         __a=$(usb_a_iface)
-        if iface_up eth0; then LOG "USB-C (eth0): connected"; else LOG "USB-C (eth0): not connected"; fi
+        if iface_up eth0; then plog "USB-C (eth0): connected"; else plog "USB-C (eth0): not connected"; fi
         if [ -z "$__a" ]; then
-            LOG "USB-A: no external adapter detected"
+            plog "USB-A: no external adapter detected"
         elif iface_up "$__a"; then
-            LOG "USB-A ($__a): connected"
+            plog "USB-A ($__a): connected"
         else
-            LOG "USB-A ($__a): detected but link down"
+            plog "USB-A ($__a): detected but link down"
         fi
-        ALERT "Adapter status - see log"
+        # IMPROVEMENT (ALERT-vs-LOG convention pass): this fired on every
+        # single use of "Check adapter status" - a menu item the operator
+        # picked on purpose, with the four status lines just LOG'd right
+        # above and nothing about the result unexpected (it's exactly what
+        # they asked to see). That's the opposite of Hak5's own convention
+        # for ALERT (a full-screen, ringtone-playing interrupt reserved for
+        # rare, high-signal events like deauth floods or captured
+        # handshakes) - a routine, 100%-of-the-time, user-requested status
+        # readout doesn't qualify, and a ringtone interrupt right after
+        # they just pressed a button to ask for exactly this only trains
+        # the operator to dismiss ALERTs on reflex, diluting the signal
+        # ALERT is supposed to carry elsewhere (see the live-capture ALERT
+        # added above for a genuinely rare/important use of it). Switched
+        # to the same "-- ... --" marker idiom already used throughout this
+        # file's scroller for a plain completion note.
+        plog "-- Adapter status shown above --"
         exit 0
         ;;
 
     "Bridge/tap both adapters (internet forwarded, brief settle time)")
-        LOG "Checking adapters (USB-C + USB-A)..."
+        plog "Checking adapters (USB-C + USB-A)..."
         __a=$(usb_a_iface)
         if [ -z "$__a" ] || ! iface_up "$__a" || ! iface_up eth0; then
             ERROR_DIALOG "Bridge/tap needs BOTH USB-C and a connected USB-A adapter. Check 'Check adapter status' to see what's missing."
             exit 0
         fi
-        LOG "USB-C (eth0) and USB-A ($__a) both connected."
+        plog "USB-C (eth0) and USB-A ($__a) both connected."
         # BUG FOUND AND FIXED (live-caught, twice - the original wording
         # was misleading): this used to claim the PC "keeps FULL internet
         # access... the whole time" - live-observed on two separate real
@@ -395,7 +576,7 @@ case "$__mode" in
         # to match what was actually observed instead of promising
         # something that wasn't quite true.
         if ! CONFIRMATION_DIALOG "Bridge eth0 <-> $__a? The PC's internet access is forwarded through, not blocked - but expect a real settling window of roughly 1-2 minutes right after this comes up where some sites load slowly or not at all while your PC's own network cache catches up with the change. It self-resolves; no action needed. Proceed?"; then
-            LOG "User cancelled."
+            plog "User cancelled."
             exit 0
         fi
         # REMOVED (asked for directly - "the dhcp doesnt work, remove it
@@ -421,17 +602,38 @@ case "$__mode" in
         # bridge command in the background and tailing sniff.sh's own
         # BRIDGE_PROGRESS_FILE (see its --bridge handler) while it runs,
         # rendering a reset.sh-style progress bar as each real step lands.
-        LOG "Bridging $__a and eth0 now - this briefly touches the network stack, so expect a real pause between steps, not a hang."
+        plog "Bridging $__a and eth0 now - this briefly touches the network stack, so expect a real pause between steps, not a hang."
         __bridge_progress_file="/tmp/pager-sniff-bridge-progress.log"
         rm -f "$__bridge_progress_file" /tmp/pager-sniff-bridge-out.log /tmp/pager-sniff-bridge-rc
         # BUG FOUND AND FIXED (defense-in-depth, CRITICAL): sniff.sh's own
         # `ip link` calls each carry a bounded timeout (see its `ip_link`
         # wrapper), but this outer timeout is a backstop against ANY other
         # unforeseen blocking condition inside sniff.sh --bridge (a wedged
-        # sysfs read in check_adapters, etc.). 60s comfortably exceeds the
-        # worst case of every internal 5s ip_link timeout firing in
-        # sequence (at most ~10 calls = 50s).
-        ( timeout 60 /root/scripts/sniff.sh --bridge eth0 "$__a" -y >/tmp/pager-sniff-bridge-out.log 2>&1
+        # sysfs read in check_adapters, etc.).
+        #
+        # BUG FOUND AND FIXED (cross-file integration trace - the "~10
+        # calls = 50s" margin claim above went stale as sniff.sh's own
+        # --bridge handler grew): recounted every ip_link()/`ip addr flush`
+        # call sniff.sh's CURRENT --bridge block actually makes, in order:
+        # 2 existence checks (BR_IFACE1, BR_IFACE2) + 1 "does $BRIDGE_NAME
+        # already exist" check + (if it does - a real, reachable case, e.g.
+        # a leftover bridge from a previous incomplete teardown; see
+        # reset.sh's own "br-sniff still exists" path for why that's not
+        # hypothetical) 2 more for tearing it down first + 1 add + 1 attach
+        # BR_IFACE1 + 1 attach BR_IFACE2 + 2 address-flush calls + 3 "up"
+        # calls (BR_IFACE1, BR_IFACE2, $BRIDGE_NAME) = 13 calls in that
+        # realistic worst case, not ~10. At sniff.sh's own default
+        # IP_LINK_TIMEOUT (5s, PAGER_IP_LINK_TIMEOUT), 13 calls each taking
+        # the full timeout before succeeding is 65s - already past the old
+        # 60s outer timeout here, meaning this backstop could fire and abort
+        # a --bridge attempt that was genuinely still making progress
+        # (never dying, just slow) rather than one that was actually stuck.
+        # Widened to 90s for real margin above the recounted 65s worst case;
+        # this is still just a backstop against something ELSE hanging
+        # (every ip_link call already fails cleanly on its own 5s timeout
+        # long before 90s), not the expected/typical duration of a healthy
+        # --bridge run.
+        ( timeout 90 /root/scripts/sniff.sh --bridge eth0 "$__a" -y >/tmp/pager-sniff-bridge-out.log 2>&1
           echo $? >/tmp/pager-sniff-bridge-rc ) &
         __bridge_pid=$!
         # BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): the unbridge
@@ -521,7 +723,7 @@ case "$__mode" in
         # attempt a third guess at its timing; a plain LOG line (which
         # doesn't need dismissing, so it can never appear stuck) keeps the
         # log the same "bridge is up" wording either way.
-        LOG "Bridge is up - pick a capture duration next."
+        plog "Bridge is up - pick a capture duration next."
         # BUG FOUND AND FIXED: previously the ONLY --unbridge call was
         # after run_live_capture returned successfully - if anything
         # between here and there went wrong (a cancelled picker, an
@@ -565,7 +767,27 @@ case "$__mode" in
             __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
             LOG "$__out"
             maybe_save_log "$__out"
-            ALERT "Capture complete - see log"
+            # IMPROVEMENT (ALERT-vs-LOG convention pass): this ALERT fired
+            # unconditionally at the end of EVERY completed capture - not a
+            # rare event, and not one the operator could plausibly miss:
+            # by this point they've already pressed B, answered "Stop
+            # monitoring and exit?", read the summary just LOG'd above, and
+            # answered maybe_save_log's own save-or-not prompt - three
+            # direct interactions in a row on this exact screen. A full-
+            # screen, ringtone-playing interrupt immediately after all that
+            # tells them nothing new; it only trains them to reflex-dismiss
+            # ALERTs, which is exactly what the platform's own convention
+            # (deauth floods, handshakes, client connections - rare and
+            # important) argues against, and dilutes the signal value of
+            # the genuinely-important ALERT added above for a live
+            # [CREDS FOUND] hit. (The Timer-elapsed path has the same
+            # property from the other direction: run_live_capture already
+            # gates on a button press - "Press any button to see the
+            # summary" - before ever reaching here, so an away operator
+            # already had to come back regardless of this ALERT.) Switched
+            # to the same "-- ... --" completion-marker idiom already used
+            # throughout this file's scroller output.
+            plog "-- Capture complete --"
         fi
         ;;
 
@@ -575,7 +797,7 @@ case "$__mode" in
             __iface="$__a"
         elif iface_up eth0; then
             __iface="eth0"
-            LOG "No USB-A adapter - using eth0 (built-in port, may include your own SSH session)."
+            plog "No USB-A adapter - using eth0 (built-in port, may include your own SSH session)."
         else
             ERROR_DIALOG "No wired LAN adapter connected - nothing to sniff."
             exit 0
@@ -589,7 +811,12 @@ case "$__mode" in
             __out=$(/root/scripts/sniff.sh --summary "$CAPTURE_FILE" 2>&1)
             LOG "$__out"
             maybe_save_log "$__out"
-            ALERT "Capture complete - see log"
+            # IMPROVEMENT: same reasoning as the Bridge/tap path above -
+            # this is the routine end of every completed capture, not a
+            # rare/important event, and fires after three direct operator
+            # interactions in a row (B, the stop confirmation, the save
+            # prompt) that already had their attention on this screen.
+            plog "-- Capture complete --"
         fi
         ;;
 esac

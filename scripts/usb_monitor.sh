@@ -251,7 +251,16 @@ trap _on_stop INT TERM
 # effect, same as everywhere else this class of risk is already guarded.
 notify() {
     say "$1"
-    command -v LOG >/dev/null 2>&1 && timeout 5 LOG "$1" >/dev/null 2>&1
+    # BUG FOUND AND FIXED (integration re-audit): the on-screen LOG call had
+    # no subsystem tag, unlike say()'s own console output just above (which
+    # already prefixes every line with "[$TOOL_NAME]" via lib/common.sh).
+    # lan_sniffer/payload.sh's own on-screen narration got the matching
+    # "[LAN Sniffer] " tag this same session specifically so an operator
+    # watching the screen during a bridge session (where both scripts can
+    # legitimately report on the same physical USB-A event) can tell which
+    # independent script a line came from. This was the untagged half of
+    # that fix.
+    command -v LOG >/dev/null 2>&1 && timeout 5 LOG "[usb_monitor.sh] $1" >/dev/null 2>&1
 }
 
 # get_internal_radio_usb_path - THE ACTUAL ROOT CAUSE of "USB-A never

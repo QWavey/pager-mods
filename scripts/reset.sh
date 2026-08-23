@@ -465,9 +465,17 @@ reset_network() {
     # already back in br-lan by this point regardless of what happens to
     # a session connected through br-sniff's own address (see this
     # function's own header comment for why this moved to here).
+    # BUG FOUND AND FIXED (integration re-audit): this was a bare
+    # `kill $(cat pidfile)` with no pid_running() guard, unlike every other
+    # pidfile-kill site in this file (see the watchdog kills above) and
+    # unlike sniff.sh's own stop_bridge_dhcp(), which was explicitly
+    # hardened this session for the exact same PID-reuse risk on this exact
+    # pidfile (a real udhcpc daemon that can run up to an hour - see that
+    # function's own "CRITICAL" comment). reset.sh had its own independent
+    # copy of "kill whatever's in the DHCP pidfile" that never got the same
+    # treatment. Now gated the same way.
     if [ -f /tmp/pager-sniff-bridge-dhcp.pid ]; then
-        _dhcp_pid=$(cat /tmp/pager-sniff-bridge-dhcp.pid 2>/dev/null)
-        [ -n "$_dhcp_pid" ] && kill "$_dhcp_pid" 2>/dev/null
+        pid_running /tmp/pager-sniff-bridge-dhcp.pid udhcpc && kill "$(cat /tmp/pager-sniff-bridge-dhcp.pid)" 2>/dev/null
         rm -f /tmp/pager-sniff-bridge-dhcp.pid
     fi
     # BUG FOUND AND FIXED (CRITICAL): these `ip link` calls had no timeout
