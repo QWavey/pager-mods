@@ -77,6 +77,10 @@ LOGFILE="/tmp/pager-usbmon.log"
 # as an authoritative replacement for its own check - it goes stale the
 # moment usb_monitor.sh isn't running, with nothing here to signal that.
 USB_A_STATEFILE="/tmp/pager-usb-a-state"
+# How long an attach/detach ALERT stays on screen before notify() auto-
+# dismisses it via lib/dismiss_alert.py - see notify()'s own comment for
+# the full story. User-requested value from live testing.
+ALERT_AUTODISMISS_SECS=1.5
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
@@ -261,6 +265,77 @@ notify() {
     # independent script a line came from. This was the untagged half of
     # that fix.
     command -v LOG >/dev/null 2>&1 && timeout 5 LOG "[usb_monitor.sh] $1" >/dev/null 2>&1
+
+    # BUG FOUND AND FIXED (CRITICAL, live-reported - "unplugged/replugged
+    # both ports, no message shown on screen"): LOG never had a real
+    # destination for a standalone background daemon. Per Hak5's own docs,
+    # LOG's output "appears in the payload console when a DuckyScript
+    # payload is executing" - this script is deliberately NOT a payload
+    # (see the file header), so it never has an active payload console to
+    # write into. Confirmed live: a bare `LOG "..."` over SSH with no
+    # payload running produced no visible effect on the physical device at
+    # all. This means every notify() call this whole file has ever made
+    # was silently going nowhere in this script's actual, permanent
+    # runtime context - not a regression from tonight, a gap present since
+    # this script was first written.
+    #
+    # First attempt at a fix used VIBRATE instead (also confirmed live to
+    # work standalone, unlike LOG) - correctly rejected: the ask was
+    # specifically an on-screen MESSAGE, not a physical buzz. Re-tested
+    # ALERT the same way LOG and VIBRATE were tested (bare SSH, zero
+    # payload running) and confirmed live it DOES render as real on-screen
+    # text in that exact context, unlike LOG. The difference: per Hak5's
+    # own docs LOG is scoped to a payload's own console view, while ALERT
+    # is a system-level interrupt that can take over the screen from
+    # anywhere (the same mechanism their own "alert payloads" category
+    # uses, itself triggered by a background service with no foreground
+    # payload running either) - so it was never actually true that NO
+    # on-screen text works standalone, only that LOG specifically doesn't.
+    #
+    # BUG FOUND AND FIXED (live-reported follow-up): the first version of
+    # this fix fired ALERT synchronously and relied on ALERT's own
+    # confirmed-nonexistent duration parameter - live testing showed a
+    # detach event's ALERT could sit on screen, apparently blocking/
+    # queuing behind it, until the NEXT event (e.g. the matching re-
+    # attach) finally pushed both through together - the platform-queuing
+    # behavior this codebase's own postmortems already documented for
+    # ALERT elsewhere. Fixed two ways: (1) fire ALERT in a backgrounded
+    # subshell instead of inline, so notify() and run_monitor's main loop
+    # are never blocked waiting on it, and (2) actually dismiss it ~1.5s
+    # later instead of leaving it queued indefinitely - via
+    # lib/dismiss_alert.py, a small script built specifically for this
+    # (there is no official API for it - confirmed live: no BUTTON_PRESS
+    # binary exists despite being listed in Hak5's generic docs, and
+    # ALERT itself has no duration/timeout parameter). It works by talking
+    # directly to the same local WebSocket (/tmp/api.sock,
+    # /api/pager/input/keys.ws) the physical A/B buttons and the Virtual
+    # Pager web app's own on-screen buttons use - reverse-engineered live
+    # by reading that web app's own JavaScript, not guessed. Verified live
+    # repeatedly: fire ALERT, wait 1.5s, send "Enter" through the script -
+    # the alert reliably disappears with no physical button press.
+    #
+    # Only fired for the two events that were actually reported as missing
+    # - a full attach or a full detach - not for the finer-grained
+    # "detected but link down" sub-state, which stays LOG-only (a lower-
+    # severity partial-connection state didn't seem worth the same
+    # disruption cost as a full plug event; revisit if that's wrong in
+    # practice). Matched on the message text (not a separate parameter
+    # threaded through every one of this function's 6 call sites) since
+    # the message vocabulary is small, fixed, and entirely under this
+    # file's own control.
+    case "$1" in
+        *"attached"*|*"detached"*)
+            if command -v ALERT >/dev/null 2>&1; then
+                (
+                    timeout 5 ALERT "[usb_monitor.sh] $1" >/dev/null 2>&1
+                    sleep "$ALERT_AUTODISMISS_SECS"
+                    _py=$(resolve_python3 2>/dev/null) || exit 0
+                    timeout 5 $_py "$SCRIPT_DIR/lib/dismiss_alert.py" Enter >/dev/null 2>&1
+                ) &
+                disown 2>/dev/null
+            fi
+            ;;
+    esac
 }
 
 # get_internal_radio_usb_path - THE ACTUAL ROOT CAUSE of "USB-A never
