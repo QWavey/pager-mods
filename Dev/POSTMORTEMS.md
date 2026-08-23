@@ -1,6 +1,6 @@
 # Postmortems - things that bit us once, don't repeat them
 
-Sixteen incidents, grouped by area. Each is collapsed by default - click a
+Seventeen incidents, grouped by area. Each is collapsed by default - click a
 line to expand it.
 
 ### Platform / OS-level
@@ -263,4 +263,53 @@ payload log" menu instead of this payload's own confirm-then-save-log
 flow. Most likely the platform's own kill-payload control being used
 instead of this payload's B-button handling, which this script has no
 way to override, but not confirmed without seeing it reproduced live.
+</details>
+
+### USB monitor - on-screen notification
+
+<details>
+<summary><b>ALERT fired in reaction to a real USB-C detach doesn't render until a later UI event - a closed-platform limitation, not a fixable bug</b></summary>
+
+`usb_monitor.sh` (a bare background daemon, deliberately not a payload)
+needs to show an on-screen message when a device attaches/detaches on
+USB-C (eth0) or USB-A. Reported symptom: unplugging USB-C showed nothing,
+and only when it was plugged back in did BOTH messages appear together,
+detach first.
+
+This was chased through many rounds and many theories, each deployed and
+each still broken: `LOG` (turned out to only render inside an active
+payload console, invisible for a bare daemon); `VIBRATE`/`LED` (work, but
+the user wanted on-screen text, not a buzz/blink); `ALERT` fired
+synchronously; `ALERT` with a homegrown WebSocket auto-dismiss
+(`lib/dismiss_alert.py`, talking to the same `/tmp/api.sock` +
+`/api/pager/input/keys.ws` the physical A/B buttons use - genuinely works
+for dismissing a single manual alert); `ALERT` + a serialization lock;
+`ALERT` + widened dismiss timeout + retries; `ALERT` + a debounce that
+combined a quick unplug/replug into one message. A debug log with
+per-step timestamps eventually caught one real contributing bug (a
+`timeout 5` was killing the dismiss call under contention, `rc=124`) and
+that was fixed - but the core symptom survived every single attempt.
+
+Root cause, proven definitively: a **10-line bare watcher** - a plain
+loop polling `/sys/class/net/eth0/carrier` and calling raw `ALERT`, with
+none of this script's locks/dismiss/debounce/backgrounding - shows the
+**exact same behaviour**. So the delay is not in this script at all; it
+is in Hak5's own closed UI process. `ALERT` fired in isolation (no real
+hardware event) always renders instantly; only `ALERT` fired in direct
+reaction to a real USB-C carrier change is delayed. eth0 is this SoC's
+own **USB gadget controller**, so physically unplugging it triggers real
+USB re-enumeration that briefly stalls the closed UI process' ability to
+render a new alert until some later UI activity (such as the replug)
+flushes it. No userspace script can fix a render delay inside a closed
+binary.
+
+Resolution: `usb_monitor.sh` was rewritten clean (the iterative version
+is kept at `old/usb_monitor_old.sh`). The rewrite keeps the proven
+detection and process-lifecycle logic, drops all the notification
+machinery that was chasing this (alert lock, auto-dismiss, debounce,
+diagnostic logging, the python coupling), and fires a plain instant
+`ALERT` on every event. The USB-C-detach render timing is documented as a
+known platform limitation in the script's own header rather than pretended
+fixed. `lib/dismiss_alert.py` is kept (it's genuinely useful,
+hard-won reverse engineering) but no longer wired into the daemon.
 </details>
