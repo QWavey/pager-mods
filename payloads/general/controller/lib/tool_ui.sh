@@ -25,11 +25,13 @@ tool_airscout_menu() {
         ;;
     "Client OS fingerprint")
         LOG "Analyzing client probe requests (OS fingerprints from rand-MAC + IE patterns)..."
-        "$S/airscout.sh" --clients -y 2>&1 | head -50 | xargs LOG
+        local cf; cf=$("$S/airscout.sh" --clients -y 2>&1 | head -50)
+        LOG "$cf"
         ;;
     "PMF posture report")
         LOG "Checking AP 802.11w (PMF) posture..."
-        "$S/airscout.sh" --pmf -y 2>&1 | head -50 | xargs LOG
+        local pmf; pmf=$("$S/airscout.sh" --pmf -y 2>&1 | head -50)
+        LOG "$pmf"
         ;;
     "Clear cache")
         rm -rf /root/loot/airscout 2>/dev/null
@@ -88,7 +90,8 @@ tool_wifikit_menu() {
     "Crack with wordlist")
         local wl; wl=$(TEXT_PICKER "Wordlist path" "/root/wordlist.txt") || return
         LOG "Cracking with aircrack-ng (slow on MIPS)..."
-        "$S/wifikit.sh" --crack --wordlist "$wl" -y 2>&1 | tee /tmp/wifikit-crack.log | head -50 | xargs LOG
+        local crack; crack=$("$S/wifikit.sh" --crack --wordlist "$wl" -y 2>&1 | tee /tmp/wifikit-crack.log | head -50)
+        LOG "$crack"
         ;;
     "Show captures")
         LOG "$(ls -lt /root/loot/wifikit/*.pcapng 2>/dev/null | head -10)"
@@ -107,14 +110,16 @@ tool_wpskit_menu() {
     case "$act" in
     "Scan for WPS APs")
         LOG "Scanning for WPS-enabled APs (needs external adapter)..."
-        "$S/wpskit.sh" --scan -y 2>&1 | tee /tmp/wpskit-scan.log | head -40 | xargs LOG
+        local wps; wps=$("$S/wpskit.sh" --scan -y 2>&1 | tee /tmp/wpskit-scan.log | head -40)
+        LOG "$wps"
         ;;
     "Pixie-Dust attack")
         local bssid
         bssid=$(MAC_PICKER "Target AP MAC" "") || return
         CONFIRMATION_DIALOG "Run Pixie-Dust attack on $bssid?" || return
         LOG "Attacking $bssid (reaver pixie)..."
-        "$S/wpskit.sh" --pixie --bssid "$bssid" -y 2>&1 | tee /tmp/wpskit-pixie.log | head -50 | xargs LOG
+        local pix; pix=$("$S/wpskit.sh" --pixie --bssid "$bssid" -y 2>&1 | tee /tmp/wpskit-pixie.log | head -50)
+        LOG "$pix"
         ;;
     "Show results")
         LOG "$(cat /tmp/wpskit-scan.log 2>/dev/null | head -50)"
@@ -199,7 +204,7 @@ tool_lanscan_menu() {
         [ "$act" = "Service scan" ] && mode="service"
         [ "$act" = "Full + vuln" ] && mode="full"
         LOG "Running $mode scan on eth1..."
-        "$S/LanScan.sh" --mode "$mode" --iface eth1 -y 2>&1 | tee /tmp/lanscan.log | head -100 | xargs LOG
+        "$S/LanScan.sh" --mode "$mode" --iface eth1 -y 2>&1 | tee /tmp/lanscan.log | head -100
         ;;
     "Show results")
         LOG "$(cat /tmp/lanscan.log 2>/dev/null | head -50)"
@@ -215,24 +220,24 @@ tool_lanpwn_menu() {
     "Full auto-pwn")
         CONFIRMATION_DIALOG "Scan, NSE, creds, SMB on eth1? (several minutes, auth networks only)" || return
         LOG "Auto-pwn running..."
-        "$S/lanpwn.sh" --auto --iface eth1 -y 2>&1 | tee /tmp/lanpwn.log | tail -50 | xargs LOG
+        "$S/lanpwn.sh" --auto --iface eth1 -y 2>&1 | tee /tmp/lanpwn.log | tail -50
         ALERT "Done - see /root/loot/lanpwn/"
         ;;
     "Discovery only")
         LOG "Discovering hosts on eth1..."
-        "$S/lanpwn.sh" --scan --iface eth1 -y 2>&1 | head -50 | xargs LOG
+        "$S/lanpwn.sh" --scan --iface eth1 -y 2>&1 | head -50
         ;;
     "NSE vuln scan")
         LOG "Running NSE scripts on discovered services..."
-        "$S/lanpwn.sh" --nse --iface eth1 -y 2>&1 | head -80 | xargs LOG
+        "$S/lanpwn.sh" --nse --iface eth1 -y 2>&1 | head -80
         ;;
     "Default creds")
         LOG "Probing HTTP/FTP default credentials..."
-        "$S/lanpwn.sh" --creds --iface eth1 -y 2>&1 | head -50 | xargs LOG
+        "$S/lanpwn.sh" --creds --iface eth1 -y 2>&1 | head -50
         ;;
     "SMB loot")
         LOG "Enumerating and looting SMB shares..."
-        "$S/lanpwn.sh" --smb --iface eth1 -y 2>&1 | head -50 | xargs LOG
+        "$S/lanpwn.sh" --smb --iface eth1 -y 2>&1 | head -50
         ;;
     "Show report")
         [ -f /root/loot/lanpwn/REPORT.txt ] && LOG "$(cat /root/loot/lanpwn/REPORT.txt)" || LOG "No report yet"
@@ -247,7 +252,7 @@ tool_clientiso_menu() {
     case "$act" in
     "Scan for isolated clients"|"Test isolation")
         LOG "Testing client-to-client reachability on eth1..."
-        "$S/clientiso.sh" --iface eth1 -y 2>&1 | tee /tmp/clientiso.log | head -50 | xargs LOG
+        "$S/clientiso.sh" --iface eth1 -y 2>&1 | tee /tmp/clientiso.log | head -50
         ALERT "Isolation test done"
         ;;
     "Show results")
@@ -329,7 +334,7 @@ tool_bluetooth_menu() {
     case "$act" in
     "Scan")
         LOG "Scanning for Bluetooth devices..."
-        "$S/bluetooth.sh" --scan -y 2>&1 | head -50 | xargs LOG
+        "$S/bluetooth.sh" --scan -y 2>&1 | head -50
         ;;
     "Flood a target")
         local addr; addr=$(TEXT_PICKER "Target BT MAC" "") || return
@@ -586,12 +591,12 @@ tool_loot_menu() {
         ;;
     "Save current loot")
         LOG "Archiving current loot to USB..."
-        "$S/loot.sh" --save -y 2>&1 | head -30 | xargs LOG
+        "$S/loot.sh" --save -y 2>&1 | head -30
         ALERT "Loot saved"
         ;;
     "Archive all")
         LOG "Archiving all loot..."
-        "$S/loot.sh" --archive -y 2>&1 | head -30 | xargs LOG
+        "$S/loot.sh" --archive -y 2>&1 | head -30
         ALERT "All loot archived"
         ;;
     "Clear old")
