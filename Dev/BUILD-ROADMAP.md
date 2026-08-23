@@ -49,10 +49,10 @@ offload).
 - [ ] **I1** USB-C gadget drop (PoisonTap)  (USB Ethernet gadget + DHCP/route/DNS trap) [H]
 
 ## Cluster F — POST-HTML ideas (build after the 27)
-- [ ] **U1** USB-C device clone / whitelist bypass  (enumerate what the PC presents over USB-C gadget, clone identity onto LAN) [H]
-- [ ] **U2** DNS walled-garden redirect  (dnsmasq: answer all lookups with one allowed page; USB-C host bridged to LAN)
-- [ ] **U3** Stealth intercept ("hanging" internet)  (silent forward+withhold; nft/tc + proxy)
-- [ ] **U4** Network topology mapper  (TTL/hop, LLDP/CDP, ARP, traceroute → switch/repeater/router tree)
+- [H] **U1** USB-C device clone / whitelist bypass  (usbclone.sh: capture PC identity from eth0 lease -> clone MAC+hostname onto eth1 -> DHCP onto LAN; wired in Controller Implant)
+- [H] **U2** DNS walled-garden redirect  (walledgarden.sh: dnsmasq wildcard + optional nft lock; wired in Controller Implant)
+- [H] **U3** Stealth intercept ("hanging" internet)  (stealthnet.sh: nft masquerade out + drop the reply leg + tcpdump capture; wired in Controller Implant)
+- [H] **U4** Network topology mapper  (topomap.sh: passive LLDP/CDP + gateway MAC/TTL + traceroute hop-count + ARP -> classified tree; wired in Controller LAN)
 
 ## Cluster G — Bettercap & Wifite (build LAST)
 - [ ] **BC1** bettercap (Go) + bettercap.sh  (clone github.com/bettercap/bettercap, build/port MIPS)
