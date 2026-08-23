@@ -116,7 +116,16 @@ show_status() {
     say "PineAP / uplink status:"
     echo
     echo "-- radio0 (2.4GHz) interfaces --"
-    iw dev 2>/dev/null | awk '/phy#/{p=$0} /Interface/{print p" "$0}'
+    # BUG FOUND AND FIXED (round 1 bug-hunt): plain `iw dev` talks to the
+    # same nl80211/netlink socket family that common.sh's connected_bssid()
+    # already documents (and was fixed for) as having a real, live-diagnosed
+    # history of wedging indefinitely on this device after a topology change
+    # - `iw dev wlan0cli link` is wrapped in $IP_LINK_TIMEOUT there for
+    # exactly this reason, but this near-identical `iw dev` call (listing ALL
+    # interfaces) was left completely unguarded. A wedge here would hang
+    # `EvilTwin.sh --status` indefinitely. Wrapped with the same shared
+    # timeout common.sh already established for this class of call.
+    timeout "$IP_LINK_TIMEOUT" iw dev 2>/dev/null | awk '/phy#/{p=$0} /Interface/{print p" "$0}'
     echo
     # IMPROVEMENT (round 1 - genuine feature, not a bug fix): --status used
     # to show only interface/uplink plumbing, never whether a clone AP is
@@ -147,14 +156,24 @@ show_status() {
     # all, unlike sniff.sh/reset.sh/common.sh which all use the shared
     # ip_link() wrapper for every `ip link` call so a stuck/hanging `ip`
     # can't block the caller indefinitely).
+    #
+    # BUG FOUND AND FIXED (round 1 bug-hunt): that fix only covered the
+    # `ip link show eth1` EXISTENCE check via ip_link() - the actual data
+    # calls right below it (`ip -4 addr show eth1`, and the wlan0cli one a
+    # few lines down) were still raw, unguarded `ip addr show` calls. `ip
+    # addr show` talks to the exact same rtnetlink socket family as `ip
+    # link` - common.sh's own is_wifi_connected() was fixed for precisely
+    # this ("nothing about it is immune to that same wedge") after being the
+    # one unguarded call site left in that file; these were the equivalent
+    # gap in this file. Wrapped both with the shared $IP_LINK_TIMEOUT.
     if ip_link show eth1 >/dev/null 2>&1; then
-        ip -4 addr show eth1 2>/dev/null
+        timeout "$IP_LINK_TIMEOUT" ip -4 addr show eth1 2>/dev/null
     else
         echo "  eth1 not present (USB-C ethernet adapter not connected)"
     fi
     echo
     echo "-- WiFi client uplink (wlan0cli) --"
-    ip -4 addr show wlan0cli 2>/dev/null || echo "  not configured"
+    timeout "$IP_LINK_TIMEOUT" ip -4 addr show wlan0cli 2>/dev/null || echo "  not configured"
     echo
     # IMPROVEMENT (round 1, continued): last-saved settings are what --on
     # will actually restore, but were previously invisible until you ran
@@ -328,12 +347,22 @@ setup_uplink() {
                 die "Ethernet uplink requested but eth1 is not present. Plug in the USB-C ethernet adapter, or use --uplink wifi."
             fi
             say "Using Ethernet uplink (eth1) - radio0 is fully free for PineAP. This is the officially recommended, stable configuration."
+            # BUG FOUND AND FIXED (round 1 bug-hunt, same class as
+            # show_status()'s fix above): this poll loop's own `ip -4 addr
+            # show eth1` was another unguarded netlink call in this same
+            # file - and worse here, since a single wedged call inside a
+            # 10-iteration polling loop wouldn't just cost one $IP_LINK_TIMEOUT
+            # delay, it would hang the ENTIRE setup_uplink() call (and thus
+            # the whole script, run over SSH) on the very first iteration,
+            # never reaching the sleep/retry logic at all. Wrapped both the
+            # in-loop check and the final post-loop check with the shared
+            # $IP_LINK_TIMEOUT.
             local tries=0
             while [ $tries -lt 10 ]; do
-                ip -4 addr show eth1 2>/dev/null | grep -q "inet " && break
+                timeout "$IP_LINK_TIMEOUT" ip -4 addr show eth1 2>/dev/null | grep -q "inet " && break
                 sleep 1; tries=$((tries+1))
             done
-            if ! ip -4 addr show eth1 2>/dev/null | grep -q "inet "; then
+            if ! timeout "$IP_LINK_TIMEOUT" ip -4 addr show eth1 2>/dev/null | grep -q "inet "; then
                 err "eth1 has no IPv4 address yet. Check the cable/router on the other end. Continuing anyway."
             fi
             ;;
@@ -393,6 +422,22 @@ say "Configuring clone access point..."
 
 if [ -n "$CLONE_PW" ]; then
     say "Cloning '$CLONED_SSID' as a WPA2 access point (Pineapple Evil WPA)."
+    # BUG FOUND AND FIXED (round 1 bug-hunt, verified by tracing control
+    # flow): PINEAPPLE_MIMIC_ENABLE is only ever called in the OPEN-AP
+    # branch below (`else`) - the --mimic/MIMIC flag was silently a no-op
+    # whenever a clone password was set, with no warning anywhere. Worse,
+    # `cfg_set last_mimic "$MIMIC"` further down persists MIMIC UNCONDITIONALLY
+    # regardless of which branch ran, so `--cloned "X" --clone-pw "Y" --mimic`
+    # (or answering "yes" to both interactive prompts, which the script lets
+    # you do even though the mimic prompt's own text says "open AP only")
+    # would save last_mimic=1 and later show "mimic: yes" in --status's "Last
+    # saved settings", even though mimic was never actually enabled this run
+    # or any future --on rerun of these exact settings. Warn now and reset
+    # MIMIC=0 so the persisted state matches what actually happened.
+    if [ "$MIMIC" = "1" ]; then
+        err "Mimic mode requires an OPEN clone AP - ignoring --mimic since a clone password was given (not enabled, not saved)."
+        MIMIC=0
+    fi
     if [ -n "$BSSID" ]; then
         WIFI_WPA_AP wlan0wpa "$CLONED_SSID" psk2 "$CLONE_PW" "$BSSID" || die "WIFI_WPA_AP failed"
     else
@@ -472,16 +517,42 @@ if [ "$RESOLVED_UPLINK_MODE" = "wifi" ]; then
     cfg_set last_uplink_pw "$UPLINK_PW"
 fi
 
+# BUG FOUND AND FIXED (round 1 bug-hunt): PINEAPPLE_NETWORK_FILTER_MODE/_ADD
+# were called here with NO error checking and no timeout at all - unlike
+# this exact pair of commands in this SAME file's own --stop teardown
+# (`timeout 20 PINEAPPLE_NETWORK_FILTER_DELETE ...`, `timeout 20
+# PINEAPPLE_NETWORK_FILTER_MODE deny ...`), and unlike filters.sh's own
+# documented standard for these commands ("a filter change that silently
+# fails to apply is a real 'user believes they're protected when they're
+# not' gap"). --scope-filter's whole point is to guarantee PineAP only
+# answers for the cloned SSID during this engagement - if either call
+# failed silently, the summary/help text below would still tell the user
+# scoping is active when it might not be. Timeout-wrapped (matching --stop's
+# own 20s for the sibling commands) and now checked, with a clear warning on
+# failure instead of silence.
 if [ "$SCOPE_FILTER" = "1" ]; then
     say "Scoping PineAP network filter to '$CLONED_SSID' only (allow mode)."
-    PINEAPPLE_NETWORK_FILTER_MODE allow
-    PINEAPPLE_NETWORK_FILTER_ADD "$CLONED_SSID"
+    if timeout 20 PINEAPPLE_NETWORK_FILTER_MODE allow && timeout 20 PINEAPPLE_NETWORK_FILTER_ADD "$CLONED_SSID"; then
+        :
+    else
+        err "Failed to scope the PineAP network filter to '$CLONED_SSID' - the clone AP is up, but PineAP's network filter may NOT actually be restricted the way --scope-filter is supposed to guarantee. Check with 'filters.sh network list allow'."
+    fi
 fi
 
+# BUG FOUND AND FIXED (round 1 bug-hunt): WIFI_PCAP_START's exit status was
+# never checked - "Capture running: ..." printed unconditionally even if the
+# capture failed to start, with only the fallback text ("see $LOOT_DIR")
+# hinting anything might be off, and nothing actually telling the user the
+# command failed. For a --record run, a user walking away believing evidence
+# is being captured when it isn't is a real "silently not doing the thing
+# you asked for" gap, the same class already fixed throughout this codebase.
 if [ "$RECORD" = "1" ]; then
     say "Starting official WIFI_PCAP capture..."
-    PCAP_FILE=$(WIFI_PCAP_START)
-    say "Capture running: ${PCAP_FILE:-see $LOOT_DIR}"
+    if PCAP_FILE=$(WIFI_PCAP_START); then
+        say "Capture running: ${PCAP_FILE:-see $LOOT_DIR}"
+    else
+        err "WIFI_PCAP_START failed - no capture is running despite --record being requested."
+    fi
 fi
 
 echo

@@ -47,11 +47,29 @@ TYPE="${1:-}"
 ACTION="${2:-}"
 shift 2 2>/dev/null
 
+# BUG FOUND AND FIXED (round 1 bug-hunt, verified with a standalone repro):
+# PINEAPPLE_MIMIC_DISABLE/_ENABLE were called here with NO timeout at all -
+# yet EvilTwin.sh's own --stop teardown documents (via live measurement
+# against the real device) that this EXACT command, PINEAPPLE_MIMIC_DISABLE,
+# took 15.1s on one call under transient PineAP-daemon contention, and
+# widened its own timeout to 20s specifically because a tighter margin would
+# have killed a legitimately-slow-but-successful call mid-operation. Every
+# single action in this file (mode/add/delete/clear, for both device and
+# network filters) routes through with_mimic_paused - so before this fix, a
+# single transient stall here could hang ANY filter change indefinitely, the
+# same SSH-session-hanging risk this codebase documents repeatedly (e.g.
+# reset.sh's header, EvilTwin.sh's --stop). Reproduced standalone: a
+# with_mimic_paused-shaped function calling a slow stand-in for
+# PINEAPPLE_MIMIC_DISABLE with no internal timeout had to be killed from the
+# OUTSIDE (timeout 1 on the whole call returned 124) - confirming nothing
+# inside the function itself would have stopped a real indefinite stall.
+# Wrapped both calls with the same 20s timeout EvilTwin.sh already
+# established for this identical command, instead of inventing a new number.
 with_mimic_paused() {
-    PINEAPPLE_MIMIC_DISABLE 2>/dev/null
+    timeout 20 PINEAPPLE_MIMIC_DISABLE 2>/dev/null
     "$@"
     local rc=$?
-    PINEAPPLE_MIMIC_ENABLE 2>/dev/null
+    timeout 20 PINEAPPLE_MIMIC_ENABLE 2>/dev/null
     return $rc
 }
 

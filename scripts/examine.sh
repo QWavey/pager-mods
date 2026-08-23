@@ -74,6 +74,20 @@ fi
 # its exit code here would be pointless - not applied, on purpose), which
 # makes catching a bad value BEFORE the call the only real defense against
 # it silently doing nothing.
+# BUG FOUND AND FIXED (round 1 bug-hunt, verified with a standalone repro):
+# --bssid and --channel given together silently did whatever the --bssid
+# branch below does (it's checked first and `exit 0`s), with --channel
+# accepted by argument parsing but then just discarded - no warning, no
+# error, nothing telling the caller their --channel was ignored. Reproduced
+# standalone: `examine.sh --bssid X --channel Y` traced straight into the
+# BSSID branch with Y never referenced again. Since the two are mutually
+# exclusive targets (lock to an AP's current channel vs. lock to a channel
+# number directly), fail fast with a clear reason instead of silently
+# picking one.
+if [ -n "$BSSID" ] && [ -n "$CHANNEL" ]; then
+    die "--bssid and --channel are mutually exclusive - pick one (lock to a specific AP by BSSID, or to a channel number directly)."
+fi
+
 [ -n "$CHANNEL" ] && validate_channel "$CHANNEL"
 validate_time "$TIME"
 

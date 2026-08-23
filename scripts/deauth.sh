@@ -365,7 +365,21 @@ stop_sentinel() {
         kill "$_pid" 2>/dev/null
     done
     rm -f "$SENTINEL_PIDFILE" "$SENTINEL_STATE"
-    ip link set wlan0 up 2>/dev/null
+    # BUG FOUND AND FIXED (found via code review, same class this exact
+    # codebase has live-diagnosed and fixed repeatedly elsewhere - see
+    # lib/common.sh's own ip_link() header: "a plain `ip link set eth0
+    # master br-lan` wedged indefinitely on a confused netlink socket and
+    # took SSH-over-USB-C management down with it"): this called plain
+    # `ip link`, not the shared `ip_link()` wrapper this file already
+    # sources from common.sh specifically to guard against that exact
+    # documented failure mode. Worse here than most call sites: this is
+    # inside stop_sentinel(), which --stop calls UNCONDITIONALLY as the
+    # documented backstop for "trap-based cleanup is unreliable on this
+    # device" (see Dev/POSTMORTEMS.md) - a hang here doesn't just fail to
+    # restore wlan0, it hangs --stop ITSELF, defeating the one command this
+    # whole pattern exists to make reliable. Switched to ip_link() to match
+    # every other netlink call in this codebase.
+    ip_link set wlan0 up 2>/dev/null
 }
 
 # track_foreground_pid - called as the first line of every run_*_loop
