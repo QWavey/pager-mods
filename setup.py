@@ -318,7 +318,7 @@ PAYLOAD_META = {
     "packet_tracer": {"title": "Live Packet Tracer", "author": "florian",
         "description": "Wireshark-style LIVE packet trace - WiFi connection, wired LAN, or passive nearby-WiFi monitoring. Errors clearly if there's nothing to trace. Press B to stop.", "version": "1.0"},
     "lan_sniffer": {"title": "LAN Sniffer", "author": "florian",
-        "description": "Live LAN traffic view (auto-detected adapter, or bridge/tap both ports - internet is forwarded, not blocked, with a brief settling window after bridging; self-heals eth0/br-lan if the bridge drops it) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the log. HTTP/DNS/creds flagged live with source IP and destination host. Shows a live progress bar while the bridge comes up instead of one static line.", "version": "3.5"},
+        "description": "Live LAN traffic view (auto-detected adapter, or bridge/tap both ports - internet is forwarded, not blocked, with a brief settling window after bridging; self-heals eth0/br-lan if the bridge drops it) - timer or infinite duration, A pauses/resumes, B asks to stop, then offers to save the log. HTTP/DNS/creds flagged live with source IP and destination host; a captured credential pops a dedicated alert so it can't get lost in the scroll. Shows a live progress bar while the bridge comes up instead of one static line.", "version": "3.6"},
     "reset_device": {"title": "Reset Device State", "author": "florian",
         "description": "Undo everything this toolkit can leave in a non-standard state, or a fast pineapple-app restart, or a full slow reboot. Live progress, not a wait-then-dump.", "version": "1.2"},
 }
