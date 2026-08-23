@@ -39,7 +39,7 @@ offload).
 - [ ] **L6** Pivot + reverse tunnel  (ssh -R / socat over mgmt radio — socat installed)
 - [ ] **L7** AD recon + Kerberoast  (impacket missing → scapy/manual, phase 2)
 - [H] **L8** Printer / IoT exploitation  (lanpwn.sh --nse with 609 NSE scripts installed)
-- [ ] **L9** Egress-buster + covert exfil  (port-knock outbound map + DNS/ICMP tunnel)
+- [D] **L9** Egress-buster + covert exfil  — DROPPED at user request (egress.sh removed, not wanted)
 
 ## Cluster D — Dual-radio (internal + external A8000)
 - [~] **Dual-radio herd** internal twin + internal deauth  (Controller — done)
