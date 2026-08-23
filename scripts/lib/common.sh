@@ -175,7 +175,7 @@ ip_link() { timeout "$IP_LINK_TIMEOUT" ip link "$@"; }
 # the `[ -f ... ] && kill -0 "$(cat ...)"` pattern itself, with the actual
 # stale-PID/kill-0 semantics defined in exactly one place.
 #
-# BUG FOUND AND FIXED (found via code review, parked in Tasks.md, now
+# BUG FOUND AND FIXED (found via code review, parked as a task, now
 # implemented per user request): a bare `kill -0 $PID` only proves SOME
 # process currently has that PID - not that it's still the SAME process
 # this PIDFILE was written for. If the original process died without its

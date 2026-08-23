@@ -10,7 +10,7 @@
 # BUG FOUND AND FIXED (deadnet.sh/deadnet_lan_kill were previously excluded
 # from bug-hunt/improve passes as "good enough" - re-scoped in per user
 # request; a backup of the pre-improvement versions is kept at
-# backups/Deadnet_lan_old.sh and backups/deadnet_lan_kill_payload_old.sh):
+# old/Deadnet_lan_old.sh and old/deadnet_lan_kill_payload_old.sh):
 # v3.0 backgrounded deadnet.sh itself with a plain `&` (deadnet.sh had no
 # --background flag at all despite its own header comment claiming it did)
 # - no PIDFILE, no liveness check, so a failed launch (missing scapy, a bad
