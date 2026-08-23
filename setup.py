@@ -305,6 +305,8 @@ def prune_stale_scripts(sftp, state, seen_remote_paths, log):
 
 
 PAYLOAD_META = {
+    "controller": {"title": "Controller", "author": "florian",
+        "description": "One on-screen launcher for the whole toolkit - a grid of themes (WiFi / LAN / Bluetooth / Dual-Radio / Implant / Loot). Pick a theme, it asks what you want, gathers parameters on-screen, and fires the right tool. Loops back to the grid after each action; cancel the top grid to exit. No SSH needed on-site.", "version": "1.0"},
     "custom_lan_scan": {"title": "Custom LAN Scan", "author": "florian",
         "description": "nmap scan of the wired LAN (eth1) - pick a mode on-screen, logs to /root/loot/lanscan/", "version": "2.0"},
     "wifi_deauth": {"title": "WiFi Deauth", "author": "florian",
