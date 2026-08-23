@@ -40,8 +40,29 @@ need() {
 theme_wifi() {
     need deauth.sh || return
     local a
-    a=$(LIST_PICKER "WiFi" "Deauth a target" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
+    a=$(LIST_PICKER "WiFi" "Deauth a target" "Handshake/PMKID capture" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
     case "$a" in
+    "Handshake/PMKID capture")
+        need wifikit.sh || return
+        # hcxdumptool needs a dedicated raw radio and refuses the internal
+        # wlanXmon VIFs - so on-screen capture requires the external A8000.
+        # (Internal --force capture is SSH-only, to avoid a radio hang from
+        # the on-screen menu.)
+        if [ -z "$(find_external_wifi)" ]; then
+            ERROR_DIALOG "Plug the external A8000 into USB-A for capture (internal-radio capture is SSH-only via --force). Wait ~10s and retry."
+            return
+        fi
+        local secs channel
+        secs=$(NUMBER_PICKER "Capture seconds" "60") || return
+        channel=$(NUMBER_PICKER "Channel (0 = hop all)" "0") || return
+        local chan_arg=""; [ "$channel" != "0" ] && chan_arg="--channel $channel"
+        LOG "Capturing handshakes/PMKID for ${secs}s on the external adapter..."
+        "$S/wifikit.sh" --capture --seconds "$secs" $chan_arg -y >/tmp/pager-controller.log 2>&1
+        local hash
+        hash=$("$S/wifikit.sh" --convert -y 2>&1)
+        LOG "$hash"
+        ALERT "Capture done - see log for hash file"
+        ;;
     "Deauth a target")
         local bssid target channel
         bssid=$(MAC_PICKER "AP BSSID" "") || return

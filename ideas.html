@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pager Red-Team Loadout</title>
+<style>
+  :root{
+    --bg:#0a0c10; --panel:#12161d; --panel2:#0d1116; --edge:#232c38;
+    --ink:#e9eef5; --muted:#8a99ab; --accent:#ff3b53; --accent2:#ffb020;
+    --hot:#ff6b3d; --chip:#1a212c; --ok:#39d98a; --shadow:0 8px 30px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:
+     radial-gradient(1200px 500px at 80% -10%, rgba(255,59,83,.10), transparent 60%),
+     var(--bg);color:var(--ink);
+    font:15px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  .wrap{max-width:1040px;margin:0 auto;padding:26px 20px 150px}
+  header h1{margin:0 0 4px;font-size:27px;letter-spacing:.5px}
+  header h1 .b{color:var(--accent)}
+  header .sub{color:var(--muted);margin:.2em 0 0}
+  .legend{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px;font-size:12px}
+  .legend .k{background:var(--chip);border:1px solid var(--edge);padding:3px 8px;border-radius:999px;color:var(--muted)}
+  .note{background:var(--panel);border:1px solid var(--edge);border-left:3px solid var(--accent);
+    padding:11px 14px;border-radius:8px;margin:14px 0 6px;color:var(--muted);font-size:13px}
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:16px 0 4px}
+  .btn{background:var(--chip);color:var(--ink);border:1px solid var(--edge);
+    padding:8px 14px;border-radius:8px;cursor:pointer;font:inherit;font-size:13px}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent);color:#150406;border-color:var(--accent);font-weight:800}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .cat{background:var(--panel);border:1px solid var(--edge);border-radius:12px;
+    margin:16px 0;overflow:hidden;box-shadow:var(--shadow)}
+  .cat.hero{border-color:#3a2530;box-shadow:0 0 0 1px rgba(255,59,83,.25),var(--shadow)}
+  .cat > h2{margin:0;padding:14px 16px;font-size:15px;background:var(--panel2);
+    border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:10px;cursor:pointer}
+  .cat.hero > h2{background:linear-gradient(90deg,rgba(255,59,83,.14),transparent)}
+  .cat > h2 .em{font-size:17px}
+  .cat > h2 .tag{margin-left:auto;font-size:11px;color:var(--muted);font-weight:400}
+  .cat > h2 .selall{font-size:11px;color:var(--accent2);border:1px solid var(--edge);
+    padding:3px 8px;border-radius:6px;background:var(--chip)}
+  .items{padding:6px 8px}
+  .idea{display:flex;gap:12px;align-items:flex-start;padding:11px 10px;border-radius:9px}
+  .idea:hover{background:var(--panel2)}
+  .idea input{margin-top:3px;width:18px;height:18px;accent-color:var(--accent);flex:0 0 auto;cursor:pointer}
+  .idea label{cursor:pointer;flex:1}
+  .idea .t{font-weight:700}
+  .idea .t .id{color:var(--muted);font-weight:400;font-size:12px;margin-right:6px}
+  .idea .d{color:var(--muted);font-size:12.5px;margin-top:3px}
+  .idea.checked{background:rgba(255,59,83,.07)}
+  .idea.checked .t{color:var(--accent)}
+  .chips{display:inline-flex;gap:5px;flex-wrap:wrap;vertical-align:middle;margin-left:4px}
+  .chip{font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--edge);
+    color:var(--muted);white-space:nowrap}
+  .chip.x2{color:#ffd27f;border-color:#4a3a1f;background:rgba(255,176,32,.08);font-weight:700}
+  .chip.loud{color:#ff8f6b;border-color:#3a2620} .chip.stealth{color:#8fd0ff;border-color:#20344a}
+  .chip.ctl{color:#c9a3ff;border-color:#2d2440}
+  .chip.pay{color:#ffd0d6;border-color:#3a2530}
+  .custom textarea{width:100%;min-height:70px;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--edge);border-radius:8px;padding:10px;font:inherit;font-size:13px;resize:vertical}
+  .footer{position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,transparent,var(--bg) 24%);padding:16px 20px}
+  .footer .inner{max-width:1040px;margin:0 auto;display:flex;gap:12px;align-items:center;
+    background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:12px 16px;box-shadow:var(--shadow)}
+  .count{font-size:14px}.count b{color:var(--accent);font-size:19px}
+  .footer .grow{flex:1}
+  .eng{background:var(--panel2);border:1px solid var(--edge);color:var(--ink);border-radius:8px;
+    padding:7px 10px;font:inherit;font-size:13px;width:210px}
+  .msg{font-size:12px;color:var(--muted);min-height:16px;margin-top:8px;text-align:center}
+  @media(max-width:640px){.footer .inner{flex-wrap:wrap}.eng{width:100%}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Pager <span class="b">Red-Team Loadout</span></h1>
+    <p class="sub">Pick your kit. Offensive tools that actually <b>do something and hand you loot</b> —
+      keys, hashes, creds, access. Built around dual-radio ops (internal + external A8000) and an
+      on-device controller. Authorized testing on your own gear.</p>
+    <div class="legend">
+      <span class="k">⚡ needs both radios</span>
+      <span class="k">🔊 loud</span>
+      <span class="k">🤫 stealth</span>
+      <span class="k">🔑 keys/PSK</span>
+      <span class="k">#️⃣ hashes</span>
+      <span class="k">🎫 creds</span>
+      <span class="k">🚪 access</span>
+      <span class="k">📡 MITM</span>
+      <span class="k">👁 intel</span>
+      <span class="k">💥 disruptive</span>
+      <span class="k">🎛 on-device</span>
+    </div>
+  </header>
+
+  <div class="note">
+    ✔ = pre-ticked from your earlier <code>approved-ideas.txt</code>. Tick more, then hit
+    <b>Save loadout</b> to write an updated <code>approved-ideas.txt</code> (pick the folder next to
+    <code>ideas.html</code> if your browser offers it, else it drops in Downloads).
+  </div>
+
+  <div class="toolbar">
+    <button class="btn" onclick="selectAll(true)">Select all</button>
+    <button class="btn" onclick="selectAll(false)">Clear all</button>
+    <button class="btn" onclick="toggleCats()">Collapse / expand</button>
+  </div>
+
+  <div id="cats"></div>
+
+  <div class="cat">
+    <h2><span class="em">➕</span> Your own ideas <span class="tag">free text — added to the export</span></h2>
+    <div class="items custom">
+      <textarea id="customIdeas" placeholder="One idea per line — appended to the saved file under 'Custom ideas'."></textarea>
+    </div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+</div>
+
+<div class="footer">
+  <div class="inner">
+    <div class="count"><b id="n">0</b> in loadout</div>
+    <div class="grow"></div>
+    <input class="eng" id="engagement" placeholder="engagement / label (optional)">
+    <button class="btn primary" onclick="saveApproved()">💾 Save loadout (.txt)</button>
+  </div>
+</div>
+
+<script>
+/* tag key -> [class, glyph, label] */
+const TAG={ x2:["x2","⚡","dual-radio"], loud:["loud","🔊","loud"], stealth:["stealth","🤫","stealth"],
+  keys:["pay","🔑","keys"], hash:["pay","#️⃣","hashes"], creds:["pay","🎫","creds"],
+  access:["pay","🚪","access"], mitm:["pay","📡","MITM"], intel:["pay","👁","intel"],
+  dos:["loud","💥","disruptive"], ctl:["ctl","🎛","on-device"] };
+
+/* [id, title, [tags], desc, preChecked] */
+const DATA=[
+ { cat:"Dual-radio ops — internal + external A8000 at once", em:"📡📡", hero:true, items:[
+   ["DR1","Deauth + capture split",["x2","loud","access"],"Internal radio deauths the real AP while the external A8000 stands up the rogue twin — clients drop and reconnect straight onto you. No channel-hopping compromise; each radio owns one job."],
+   ["DR2","Hands-free handshake harvest",["x2","loud","hash"],"External floods targeted deauth across the room; internal sits locked in monitor capturing every 4-way handshake that results. Walk away, come back to a full loot bag."],
+   ["DR3","On-net AND in-air together",["x2","access","intel"],"External associates to the target AP as a real client (run LAN attacks, scan, pivot) while internal stays in monitor watching the whole channel — attack and full air-visibility at the same time."],
+   ["DR4","Rogue AP with real internet",["x2","loud","mitm","creds"],"Internal serves the evil twin + captive portal; external is the live uplink so victims get working internet while every packet flows through you. Sticky, believable, full MITM."],
+   ["DR5","Client herding",["x2","loud","access"],"Internal deauths clients off the legit AP; external's same-SSID rogue AP catches each one as it scrambles to reconnect. Herd a whole room onto your box."],
+   ["DR6","Dual-band simultaneous",["x2","intel"],"2.4GHz on one radio, 5GHz on the other — survey or attack both bands at once instead of hopping and missing half of it."],
+   ["DR7","Capture while cracking",["x2","keys"],"External keeps harvesting handshakes/PMKIDs; internal (or the on-box CPU) chews a wordlist against what's already captured — live, no stop-and-switch."],
+   ["DR8","MANA loud-karma + uplink",["x2","loud","creds"],"External answers every probe request (become every SSID a client asks for); internal provides backhaul so the trap holds and harvests portal creds."],
+ ]},
+ { cat:"WiFi offense", em:"📶", items:[
+   ["W1","WPA handshake capture + crack",["loud","keys"],"Auto-pick the busiest target, force reassociation, capture the 4-way handshake, export to hashcat/hcxtools, crack on-box or offload to a GPU rig.",true],
+   ["W2","PMKID clientless capture",["stealth","keys"],"Pull WPA key material straight from APs with PMKID enabled — no client present, no deauth needed. Quiet.",true],
+   ["W3","Karma / known-beacon twin",["loud","creds"],"Listen for probe requests, then become whatever SSID the client is calling for so it auto-associates to you.",true],
+   ["W4","Evil twin + captive-portal harvest",["loud","creds"],"Clone the SSID, serve a convincing fake login / OAuth / 'firmware update' page, log every credential submitted."],
+   ["W5","WPS Pixie-Dust",["loud","keys"],"Offline WPS PIN recovery against vulnerable APs → recover the full PSK without a handshake."],
+   ["W6","Targeted deauth toolkit",["loud","dos"],"One client, a whole AP, or band-wide. Timed bursts or sustained. The precision tool behind half the attacks above."],
+   ["W7","SSID beacon flood",["loud","dos"],"Spam hundreds of fake SSIDs (your ssidpool) to bury the airwaves and stress clients/scanners."],
+   ["W8","Client-isolation tester",["access"],"On a guest/corp network, prove whether connected clients can actually reach each other — a very common misconfig.",true],
+   ["W9","PMF / 802.11w posture test",["intel"],"Find out whether management-frame protection actually blocks your deauth — tells you which APs are soft."],
+   ["W10","Crack → auto-connect → prove impact",["access"],"After recovering the PSK, actually join the network and grab a foothold to demonstrate real, not theoretical, risk."],
+   ["W11","Handshake + PMKID combo harvester",["keys"],"Run both capture methods at once, dedupe, feed one crack queue — maximum key material per minute."],
+   ["W12","Rogue 5GHz twin",["stealth","creds"],"Many clients prefer 5GHz and defenders watch it less — stand the twin up there for a quieter catch."],
+   ["W13","Client OS fingerprint (air)",["stealth","intel"],"Guess each client's device/OS from probe-request IE fingerprints without ever associating — target selection intel.",true],
+ ]},
+ { cat:"Wired LAN via USB-A adapter — auto-pwn, not just scan", em:"🦈", items:[
+   ["L1","Auto-pwn on plug-in",["loud","access"],"Plug in and walk away: recon → find defaults/known-vuln → exploit → dump loot to file. True Shark-Jack attack mode, not just enumeration."],
+   ["L2","Responder + NTLM relay",["loud","access","hash"],"Poison LLMNR/NBNS/mDNS, capture NTLMv2, and relay it live to a reachable SMB/HTTP host to land code execution — the classic internal-AD one-two."],
+   ["L3","Default-cred auto-login + config exfil",["creds"],"Walk every router/camera/NAS/printer, log in with known defaults, pull configs and stored credentials."],
+   ["L4","SMB share auto-loot",["creds"],"Crawl every readable share, grep for passwords/keys/configs, and pull the hits into the loot bag."],
+   ["L5","Selective MITM + inject",["loud","mitm"],"Rogue DHCP/ARP to intercept one chosen host and inject a payload/hook into its HTTP traffic."],
+   ["L6","Pivot + reverse tunnel",["access"],"From the wired foothold, punch an egress channel and tunnel back over the mgmt radio for remote access to the target LAN."],
+   ["L7","AD recon + Kerberoast",["hash"],"If a domain is reachable, enumerate it and request service tickets for offline cracking."],
+   ["L8","Printer / IoT exploitation",["access"],"Known-CVE exploitation of the soft targets everyone forgets — printers, cameras, IoT bridges."],
+   ["L9","Egress-buster + covert exfil",["intel"],"Map what actually escapes the network (DNS/ICMP/odd ports) and stand up a covert exfil channel over it."],
+   ["L10","Deep scan → exploit shortlist",["intel"],"Full service/version scan, auto-matched to a ready-to-fire exploit shortlist per host."],
+ ]},
+ { cat:"Bluetooth offense", em:"🦷", items:[
+   ["BT1","BLE beacon / device clone",["loud","access"],"Advertise as a trusted beacon or tag to test what blindly trusts it (badges, unlock apps, presence systems)."],
+   ["BT2","GATT write / fuzz",["access"],"Write to permitted characteristics and fuzz for crashes/unlocks on your own BLE devices."],
+   ["BT3","Tracker-clone test (AirTag-style)",["intel"],"Spoof a tracker's advertisements to test detection / anti-stalking behaviour."],
+   ["BT4","Classic BT enum + CVE",["access"],"Enumerate classic Bluetooth devices, then exploit known-vulnerable stacks."],
+   ["BT5","BLE connection exhaustion",["dos"],"Stress a target device's Bluetooth stack to test resilience (own gear)."],
+ ]},
+ { cat:"Implant / C2 / exfil", em:"🕳️", items:[
+   ["I1","USB-C gadget drop attack (PoisonTap)",["loud","creds","access"],"Plug the Pager into a PC via USB-C — it becomes the machine's network (DHCP+route+DNS), steals same-site cookies over HTTP and poisons cache. Works even on a locked screen. The device's single strongest trick."],
+   ["I2","Autonomous drop-box",["access"],"Plug in, one button: run the whole playbook, stash and relay loot, walk away. The classic leave-behind implant."],
+   ["I3","Out-of-band C2 beacon",["access"],"Implant phones home and takes tasking over the mgmt radio — a control path separate from the one it's attacking."],
+   ["I4","DNS / ICMP exfil tunnel",["intel"],"Encode loot into DNS queries or ICMP payloads to slip it past egress filtering."],
+   ["I5","Encrypted loot + auto-pull",["intel"],"Everything encrypted at rest, bundled per engagement, one command to retrieve it all."],
+   ["I6","Scheduled unattended ops",["intel"],"Cron-driven attacks/recon at set times while the box sits in place."],
+ ]},
+ { cat:"On-device controller (the GUI you asked for)", em:"🎛️", items:[
+   ["C1","controller.sh — 3×2 grid launcher",["ctl"],"On-screen 3×2 grid — WiFi / LAN / Bluetooth / Dual-radio / Implant / Loot. Pick a theme, it asks what you want, and fires the right tool. No SSH on-site."],
+   ["C2","Param editor (save / edit / cancel)",["ctl"],"Tweak each attack's timer/target/channel on-screen before launch, using the same save/edit/cancel GUI as the deauth timer."],
+   ["C3","Live attack dashboard",["ctl"],"On-screen state: current attack, capture counters, targets hit — glance and go."],
+   ["C4","One-button playbooks",["ctl"],"A = launch the selected loadout; hold B = safe teardown (restore, stop everything, flush)."],
+   ["C5","Loot meter",["ctl"],"Running tally of keys / hashes / creds / access so you know when you've got enough to pull out."],
+ ]},
+];
+
+/* ---- render ------------------------------------------------------------- */
+const catsEl=document.getElementById('cats');
+DATA.forEach((c,ci)=>{
+  const cat=document.createElement('div'); cat.className='cat'+(c.hero?' hero':'');
+  const h=document.createElement('h2');
+  h.innerHTML=`<span class="em">${c.em||''}</span><span>${c.cat}</span>
+    <span class="tag">${c.items.length}</span>
+    <span class="selall" data-ci="${ci}">select group</span>`;
+  h.addEventListener('click',e=>{
+    if(e.target.classList.contains('selall')){e.stopPropagation();groupSelect(ci);return;}
+    const it=cat.querySelector('.items'); it.style.display=it.style.display==='none'?'':'none';
+  });
+  const box=document.createElement('div'); box.className='items';
+  c.items.forEach(([id,title,tags,desc,pre])=>{
+    const row=document.createElement('div'); row.className='idea'+(pre?' checked':'');
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.id='cb_'+id; cb.checked=!!pre;
+    cb.dataset.id=id; cb.dataset.title=title; cb.dataset.cat=c.cat;
+    cb.dataset.desc=desc; cb.dataset.tags=(tags||[]).map(t=>TAG[t]?TAG[t][2]:t).join(",");
+    cb.addEventListener('change',()=>{row.classList.toggle('checked',cb.checked);updateCount();});
+    const chips=(tags||[]).map(t=>{const d=TAG[t];return d?`<span class="chip ${d[0]}">${d[1]} ${d[2]}</span>`:'';}).join('');
+    const lab=document.createElement('label'); lab.htmlFor=cb.id;
+    lab.innerHTML=`<div class="t"><span class="id">${id}</span>${title}
+      <span class="chips">${chips}</span></div><div class="d">${desc}</div>`;
+    row.append(cb,lab); box.append(row);
+  });
+  cat.append(h,box); catsEl.append(cat);
+});
+
+/* ---- interactions ------------------------------------------------------- */
+function allCbs(){return [...document.querySelectorAll('.idea input[type=checkbox]')];}
+function updateCount(){document.getElementById('n').textContent=allCbs().filter(c=>c.checked).length;}
+function selectAll(v){allCbs().forEach(c=>{c.checked=v;c.closest('.idea').classList.toggle('checked',v);});updateCount();}
+function groupSelect(ci){
+  const cbs=[...catsEl.children[ci].querySelectorAll('input[type=checkbox]')];
+  const target=!cbs.every(c=>c.checked);
+  cbs.forEach(c=>{c.checked=target;c.closest('.idea').classList.toggle('checked',target);});updateCount();
+}
+function toggleCats(){
+  const boxes=[...document.querySelectorAll('#cats .items')];
+  const anyOpen=boxes.some(b=>b.style.display!=='none');
+  boxes.forEach(b=>b.style.display=anyOpen?'none':'');
+}
+function msg(t){document.getElementById('msg').textContent=t;}
+
+/* ---- build & save ------------------------------------------------------- */
+function buildText(){
+  const chosen=allCbs().filter(c=>c.checked);
+  const eng=document.getElementById('engagement').value.trim();
+  const custom=document.getElementById('customIdeas').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const stamp=new Date().toString();
+  let out=[];
+  out.push("PAGER — RED-TEAM LOADOUT (approved ideas)");
+  out.push("=".repeat(44));
+  if(eng) out.push("Engagement/label : "+eng);
+  out.push("Generated        : "+stamp);
+  out.push("Approved count   : "+chosen.length+(custom.length?(" (+"+custom.length+" custom)"):""));
+  out.push("");
+  DATA.forEach(c=>{
+    const rows=chosen.filter(cb=>cb.dataset.cat===c.cat);
+    if(!rows.length) return;
+    out.push("## "+c.cat);
+    rows.forEach(cb=>{
+      const tg=cb.dataset.tags?("  ["+cb.dataset.tags+"]"):"";
+      out.push("  ["+cb.dataset.id+"] "+cb.dataset.title+tg);
+      out.push("        "+cb.dataset.desc);
+    });
+    out.push("");
+  });
+  if(custom.length){
+    out.push("## Custom ideas");
+    custom.forEach((c,i)=>out.push("  [C"+String(i+1).padStart(2,'0')+"] "+c));
+    out.push("");
+  }
+  out.push("-- end --");
+  return out.join("\n");
+}
+
+async function saveApproved(){
+  const n=allCbs().filter(c=>c.checked).length;
+  const customN=document.getElementById('customIdeas').value.split('\n').filter(s=>s.trim()).length;
+  if(!n && !customN){msg("Nothing selected yet — tick some tools first.");return;}
+  const text=buildText(), fname="approved-ideas.txt";
+  if(window.showSaveFilePicker){
+    try{
+      const h=await window.showSaveFilePicker({suggestedName:fname,
+        types:[{description:"Text file",accept:{"text/plain":[".txt"]}}]});
+      const w=await h.createWritable(); await w.write(text); await w.close();
+      msg("Saved "+n+" tool(s) to "+(h.name||fname)+" ✔"); return;
+    }catch(e){ if(e&&e.name==='AbortError'){msg("Save cancelled.");return;} }
+  }
+  const blob=new Blob([text],{type:"text/plain"});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+  msg("Saved "+n+" tool(s) → "+fname+" (in Downloads — move it next to ideas.html).");
+}
+updateCount();
+</script>
+</body>
+</html>

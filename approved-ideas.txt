@@ -1,0 +1,70 @@
+PAGER — RED-TEAM LOADOUT (approved ideas)
+============================================
+Generated        : Sun Aug 23 2026 21:46:19 GMT+0200 (Mitteleuropäische Sommerzeit)
+Approved count   : 27
+
+## Dual-radio ops — internal + external A8000 at once
+  [DR7] Capture while cracking  [dual-radio,keys]
+        External keeps harvesting handshakes/PMKIDs; internal (or the on-box CPU) chews a wordlist against what's already captured — live, no stop-and-switch.
+
+## WiFi offense
+  [W1] WPA handshake capture + crack  [loud,keys]
+        Auto-pick the busiest target, force reassociation, capture the 4-way handshake, export to hashcat/hcxtools, crack on-box or offload to a GPU rig.
+  [W2] PMKID clientless capture  [stealth,keys]
+        Pull WPA key material straight from APs with PMKID enabled — no client present, no deauth needed. Quiet.
+  [W3] Karma / known-beacon twin  [loud,creds]
+        Listen for probe requests, then become whatever SSID the client is calling for so it auto-associates to you.
+  [W5] WPS Pixie-Dust  [loud,keys]
+        Offline WPS PIN recovery against vulnerable APs → recover the full PSK without a handshake.
+  [W6] Targeted deauth toolkit  [loud,disruptive]
+        One client, a whole AP, or band-wide. Timed bursts or sustained. The precision tool behind half the attacks above.
+  [W7] SSID beacon flood  [loud,disruptive]
+        Spam hundreds of fake SSIDs (your ssidpool) to bury the airwaves and stress clients/scanners.
+  [W8] Client-isolation tester  [access]
+        On a guest/corp network, prove whether connected clients can actually reach each other — a very common misconfig.
+  [W9] PMF / 802.11w posture test  [intel]
+        Find out whether management-frame protection actually blocks your deauth — tells you which APs are soft.
+  [W12] Rogue 5GHz twin  [stealth,creds]
+        Many clients prefer 5GHz and defenders watch it less — stand the twin up there for a quieter catch.
+  [W13] Client OS fingerprint (air)  [stealth,intel]
+        Guess each client's device/OS from probe-request IE fingerprints without ever associating — target selection intel.
+
+## Wired LAN via USB-A adapter — auto-pwn, not just scan
+  [L1] Auto-pwn on plug-in  [loud,access]
+        Plug in and walk away: recon → find defaults/known-vuln → exploit → dump loot to file. True Shark-Jack attack mode, not just enumeration.
+  [L2] Responder + NTLM relay  [loud,access,hashes]
+        Poison LLMNR/NBNS/mDNS, capture NTLMv2, and relay it live to a reachable SMB/HTTP host to land code execution — the classic internal-AD one-two.
+  [L3] Default-cred auto-login + config exfil  [creds]
+        Walk every router/camera/NAS/printer, log in with known defaults, pull configs and stored credentials.
+  [L4] SMB share auto-loot  [creds]
+        Crawl every readable share, grep for passwords/keys/configs, and pull the hits into the loot bag.
+  [L5] Selective MITM + inject  [loud,MITM]
+        Rogue DHCP/ARP to intercept one chosen host and inject a payload/hook into its HTTP traffic.
+  [L6] Pivot + reverse tunnel  [access]
+        From the wired foothold, punch an egress channel and tunnel back over the mgmt radio for remote access to the target LAN.
+  [L7] AD recon + Kerberoast  [hashes]
+        If a domain is reachable, enumerate it and request service tickets for offline cracking.
+  [L8] Printer / IoT exploitation  [access]
+        Known-CVE exploitation of the soft targets everyone forgets — printers, cameras, IoT bridges.
+  [L9] Egress-buster + covert exfil  [intel]
+        Map what actually escapes the network (DNS/ICMP/odd ports) and stand up a covert exfil channel over it.
+  [L10] Deep scan → exploit shortlist  [intel]
+        Full service/version scan, auto-matched to a ready-to-fire exploit shortlist per host.
+
+## Implant / C2 / exfil
+  [I1] USB-C gadget drop attack (PoisonTap)  [loud,creds,access]
+        Plug the Pager into a PC via USB-C — it becomes the machine's network (DHCP+route+DNS), steals same-site cookies over HTTP and poisons cache. Works even on a locked screen. The device's single strongest trick.
+
+## On-device controller (the GUI you asked for)
+  [C1] controller.sh — 3×2 grid launcher  [on-device]
+        On-screen 3×2 grid — WiFi / LAN / Bluetooth / Dual-radio / Implant / Loot. Pick a theme, it asks what you want, and fires the right tool. No SSH on-site.
+  [C2] Param editor (save / edit / cancel)  [on-device]
+        Tweak each attack's timer/target/channel on-screen before launch, using the same save/edit/cancel GUI as the deauth timer.
+  [C3] Live attack dashboard  [on-device]
+        On-screen state: current attack, capture counters, targets hit — glance and go.
+  [C4] One-button playbooks  [on-device]
+        A = launch the selected loadout; hold B = safe teardown (restore, stop everything, flush).
+  [C5] Loot meter  [on-device]
+        Running tally of keys / hashes / creds / access so you know when you've got enough to pull out.
+
+-- end --
