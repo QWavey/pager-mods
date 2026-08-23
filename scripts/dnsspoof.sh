@@ -64,8 +64,19 @@ case "${1:-}" in
         case "$c" in
             1) DNSSPOOF_ENABLE && say "DNS spoofing on." || err "Failed to enable DNS spoofing." ;;
             2) DNSSPOOF_DISABLE && say "DNS spoofing off." || err "Failed to disable DNS spoofing." ;;
-            3) h=$(ask "Hostname" ""); i=$(ask "IP to resolve it to" ""); DNSSPOOF_ADD_HOST "$h" "$i" && say "Added $h -> $i" || err "Failed to add $h -> $i" ;;
-            4) h=$(ask "Hostname to remove" ""); DNSSPOOF_DEL_HOST "$h" && say "Removed $h" || err "Failed to remove $h" ;;
+            # BUG FOUND AND FIXED (bug-hunt pass): choices 3/4 called
+            # DNSSPOOF_ADD_HOST/DEL_HOST with whatever ask() returned,
+            # including an empty string on a blank Enter - unlike this same
+            # file's own CLI --add/--del above, which explicitly `die` when
+            # HOST is missing (`[ $# -lt 2 ]` / `[ $# -lt 1 ]`) before ever
+            # calling the underlying command. An empty HOST handed to
+            # DNSSPOOF_ADD_HOST risks a blanket/wildcard spoof entry rather
+            # than a clear "you didn't type anything" error - the opposite
+            # of what a DNS-spoofing tool's empty-input handling should do.
+            # Verified via ask(): with a blank default (both calls here pass
+            # ""), pressing Enter returns an empty string, not a re-prompt.
+            3) h=$(ask "Hostname" ""); i=$(ask "IP to resolve it to" ""); [ -z "$h" ] && err "Hostname cannot be empty." || { DNSSPOOF_ADD_HOST "$h" "$i" && say "Added $h -> $i" || err "Failed to add $h -> $i"; } ;;
+            4) h=$(ask "Hostname to remove" ""); [ -z "$h" ] && err "Hostname cannot be empty." || { DNSSPOOF_DEL_HOST "$h" && say "Removed $h" || err "Failed to remove $h"; } ;;
             5) confirm "Clear all entries?" && { DNSSPOOF_CLEAR && say "Cleared." || err "Failed to clear DNS spoof entries."; } || err "Aborted." ;;
             *) say "Nothing to do." ;;
         esac

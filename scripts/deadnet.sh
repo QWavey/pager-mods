@@ -135,12 +135,31 @@ fi
 # EvilTwin.sh/LanScan.sh/tracer.sh this session): use the shared
 # timeout-protected ip_link() wrapper instead of a raw, unbounded
 # `ip link show`.
-lan_available() { ip_link show "$IFACE" >/dev/null 2>&1 && ip -4 addr show "$IFACE" 2>/dev/null | grep -q "inet "; }
+#
+# BUG FOUND AND FIXED (found via code review, same class as
+# is_wifi_connected()/connected_bssid() in lib/common.sh - see that file's
+# own header comment for the live-reproduced incident: a plain `ip`/`iw`
+# netlink call wedging indefinitely on a confused netlink socket after a
+# topology change, taking SSH-over-USB-C management down with it): the
+# second half of this check, `ip -4 addr show "$IFACE"`, was a raw,
+# unbounded netlink call - the exact call-shape common.sh's own
+# IP_LINK_TIMEOUT guard exists to bound, just not routed through it here.
+# Wrapped with the same shared timeout so a wedged socket makes this check
+# fail fast instead of hanging the whole script (including --discover and
+# the pre-attack confirmation prompt, both of which call this first).
+lan_available() { ip_link show "$IFACE" >/dev/null 2>&1 && timeout "$IP_LINK_TIMEOUT" ip -4 addr show "$IFACE" 2>/dev/null | grep -q "inet "; }
 
 get_subnet() {
     # Reuses the same portable, python3-free CIDR math as LanScan.sh.
+    #
+    # BUG FOUND AND FIXED (same class as lan_available() above): another
+    # raw, unbounded `ip ... addr show` call - get_subnet() feeds
+    # discover_hosts() (the pre-attack host scan) and is on the hot path
+    # for every non---discover run too, so a wedge here would hang before
+    # the attack even starts, with no timeout anywhere in the call chain to
+    # recover. Bounded with the same shared IP_LINK_TIMEOUT.
     local cidr ip_addr prefix
-    cidr=$(ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | head -1)
+    cidr=$(timeout "$IP_LINK_TIMEOUT" ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | head -1)
     [ -z "$cidr" ] && return 1
     ip_addr="${cidr%/*}"
     prefix="${cidr#*/}"

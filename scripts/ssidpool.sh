@@ -73,9 +73,36 @@ case "${1:-}" in
         c=$(ask "Choose" "1")
         case "$c" in
             1) PINEAPPLE_SSID_POOL_LIST ;;
-            2) s=$(ask "SSID to add" ""); PINEAPPLE_SSID_POOL_ADD "$s" && say "Added." || err "Failed to add '$s'." ;;
-            3) s=$(ask "SSID to delete" ""); PINEAPPLE_SSID_POOL_DELETE "$s" && say "Deleted." || err "Failed to delete '$s'." ;;
-            4) confirm "Clear the entire pool?" && { PINEAPPLE_SSID_POOL_CLEAR && say "Cleared." || err "Failed to clear the pool."; } ;;
+            # BUG FOUND AND FIXED (bug-hunt pass): choices 2/3 called
+            # PINEAPPLE_SSID_POOL_ADD/DELETE with whatever ask() returned,
+            # including an empty string if the user just hit Enter with no
+            # input - unlike this same file's own CLI `add`/`delete` cases
+            # above, which explicitly `die` on `[ $# -eq 0 ]` before ever
+            # calling the underlying command. Interactive mode had no
+            # equivalent guard, so a blank prompt response would silently
+            # attempt to add/delete an empty-string SSID instead of telling
+            # the user to actually type one - same class of gap as
+            # config.sh's own `[ -z "$SET_KEY" ] && die ...` guards on its
+            # ask()'d input. Verified by reading ask(): with a blank
+            # `default` argument (both calls here pass ""), pressing Enter
+            # returns an empty string, not a re-prompt.
+            2) s=$(ask "SSID to add" ""); [ -z "$s" ] && err "SSID cannot be empty." || { PINEAPPLE_SSID_POOL_ADD "$s" && say "Added." || err "Failed to add '$s'."; } ;;
+            3) s=$(ask "SSID to delete" ""); [ -z "$s" ] && err "SSID cannot be empty." || { PINEAPPLE_SSID_POOL_DELETE "$s" && say "Deleted." || err "Failed to delete '$s'."; } ;;
+            # BUG FOUND AND FIXED (bug-hunt pass, verified with a standalone
+            # repro of this exact `confirm && {...}` shape piped "n"): unlike
+            # this file's own CLI `clear` case above (an explicit if/else)
+            # and dnsspoof.sh's already-fixed --clear/choice-5 (both end
+            # their confirm chain in `|| err/die "Aborted."`), this
+            # interactive choice 4 had no fallback for confirm() returning
+            # nonzero - answering anything but y/Y/yes/YES to "Clear the
+            # entire pool?" made the whole `confirm && {...}` expression
+            # short-circuit with ZERO output: no "Cleared.", no "Aborted.",
+            # nothing, leaving the user unsure whether their "no" even
+            # registered. Repro: piping "n" into the exact same
+            # confirm()/say()/err() shape printed nothing but a nonzero exit
+            # code. Added the same `|| err "Aborted."` fallback dnsspoof.sh
+            # already uses for the identical pattern.
+            4) confirm "Clear the entire pool?" && { PINEAPPLE_SSID_POOL_CLEAR && say "Cleared." || err "Failed to clear the pool."; } || err "Aborted." ;;
             5) r=$(ask "Random BSSID per SSID? (y/N)" "N"); case "$r" in
                    y|Y) PINEAPPLE_SSID_POOL_START random && say "Advertising started." || err "Failed to start advertising." ;;
                    *) PINEAPPLE_SSID_POOL_START && say "Advertising started." || err "Failed to start advertising." ;;
