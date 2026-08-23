@@ -72,16 +72,33 @@ def send_key(key: str) -> bool:
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n"
     )
+    # A single recv() isn't enough: a slow/chunked response can deliver the
+    # status line split across more than one TCP segment (verified with a
+    # local fake server that wrote "HTTP/1.1 10" then, after a delay, "1
+    # Switching Protocols..." - a single fixed-size recv() captured only
+    # the first fragment and the handshake was reported as failed even
+    # though the server would have upgraded). Keep reading until we have
+    # the full header block (terminated by the blank line) or the peer
+    # closes/times out.
     try:
         s.sendall(request.encode())
-        response = s.recv(4096)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            response += chunk
     except OSError as e:
         print(f"dismiss_alert.py: handshake I/O error: {e}", file=sys.stderr)
         s.close()
         return False
 
     status_line = response.split(b"\r\n", 1)[0]
-    if b"101" not in status_line:
+    # Match the actual HTTP status code field, not a raw substring of the
+    # whole line (a substring check could be fooled by "101" appearing
+    # elsewhere, e.g. in a reason phrase or a differently-numbered status).
+    status_parts = status_line.split(b" ", 2)
+    if len(status_parts) < 2 or status_parts[1] != b"101":
         print(f"dismiss_alert.py: handshake failed: {status_line!r}", file=sys.stderr)
         s.close()
         return False
@@ -96,9 +113,19 @@ def send_key(key: str) -> bool:
     length = len(payload)
     if length < 126:
         frame.append(0x80 | length)
-    else:
+    elif length < 65536:
         frame.append(0x80 | 126)
         frame.extend(struct.pack(">H", length))
+    else:
+        # RFC 6455 Sec. 5.2: lengths >= 65536 use the 127 marker with an
+        # 8-byte extended length field. Without this branch,
+        # struct.pack(">H", length) raises struct.error uncaught for any
+        # key >= 64KiB (verified: struct.pack(">H", 70000) ->
+        # "'H' format requires 0 <= number <= 65535"). Real key names are
+        # short ("Enter"/"Escape"), but argv[1] is caller-controlled, so an
+        # oversized argument shouldn't crash with a traceback.
+        frame.append(0x80 | 127)
+        frame.extend(struct.pack(">Q", length))
     frame.extend(mask)
     frame.extend(b ^ mask[i % 4] for i, b in enumerate(payload))
 
@@ -114,6 +141,16 @@ def send_key(key: str) -> bool:
 
 
 if __name__ == "__main__":
+    # Only sys.argv[1] is ever read as the key. Anything after it used to
+    # be silently dropped (e.g. a caller passing an unquoted key with
+    # spaces would have it silently truncated to the first word with no
+    # error), which could mask a caller mistake. Reject it explicitly.
+    if len(sys.argv) > 2:
+        print(
+            f"dismiss_alert.py: expected at most one argument (the key), got {len(sys.argv) - 1}: {sys.argv[1:]!r}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     key_to_send = sys.argv[1] if len(sys.argv) > 1 else "Enter"
     ok = send_key(key_to_send)
     sys.exit(0 if ok else 1)

@@ -80,7 +80,7 @@ USB_A_STATEFILE="/tmp/pager-usb-a-state"
 # How long an attach/detach ALERT stays on screen before notify() auto-
 # dismisses it via lib/dismiss_alert.py - see notify()'s own comment for
 # the full story. User-requested value from live testing.
-ALERT_AUTODISMISS_SECS=1.5
+ALERT_AUTODISMISS_SECS=2
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
@@ -97,6 +97,28 @@ while [ $# -gt 0 ]; do
         *) err "Unknown argument: $1"; usage ;;
     esac
 done
+
+# BUG FOUND AND FIXED (fresh bug-hunt pass, dead-code/consistency check):
+# DO_WATCH was set by --watch but never actually READ anywhere else in this
+# file - --status/--stop/--background each gate their own block on their
+# own DO_* flag, but nothing gated on DO_WATCH; the script just fell
+# through to the unconditional `run_monitor` call at the very end
+# regardless of whether --watch, no flags at all, or (if it somehow fell
+# through, e.g. a future edit reordering these blocks) some other
+# unhandled combination got there. In practice every real caller
+# (setup.py, reset.sh) always passes an explicit --background/--status/
+# --stop, so this never actually misbehaved live - but it meant a bare
+# `usb_monitor.sh` with NO arguments silently started an undocumented
+# foreground daemon (never mentioned in the Usage/Options block above)
+# instead of printing usage like every other unrecognized invocation does,
+# and --watch itself was pure documentation with no code actually checking
+# it. Fixed by requiring at least one of the four documented actions
+# up front - makes DO_WATCH a real, checked flag and turns the previously-
+# silent no-args case into the same usage() every other invalid
+# invocation already gets.
+if [ "$DO_WATCH" != "1" ] && [ "$BACKGROUND" != "1" ] && [ "$DO_STOP" != "1" ] && [ "$DO_STATUS" != "1" ]; then
+    usage
+fi
 
 # BIG CHANGE (adopting common.sh's shared primitive): backed by the one
 # canonical pid_running() in lib/common.sh instead of yet another copy.
@@ -154,14 +176,72 @@ is_running() { pid_running "$PIDFILE" "usb_monitor.sh"; }
 # confirmed a genuinely live holder is never mistaken for stale, and a
 # waiter that can't get the lock within the timeout fails cleanly (a clear
 # die() message naming $LOCKDIR) instead of hanging indefinitely.
+# BUG FOUND AND FIXED (bug-hunt pass, CRITICAL - verified with a standalone
+# repro before touching this file): the stale-holder check only fires when
+# $LOCKDIR/pid has CONTENT naming a dead PID. There's a real TOCTOU gap
+# between `mkdir "$LOCKDIR"` succeeding and the `echo $$ > "$LOCKDIR/pid"`
+# a few lines below it actually landing - if the holder is killed (SIGKILL,
+# OOM, a crash) in exactly that window, $LOCKDIR exists forever with NO pid
+# file ever written. Every future waiter then computes `holder=""`, so
+# `[ -n "$holder" ]` is false and the cleanup branch never runs - the lock
+# is permanently unrecoverable, not just temporarily stuck. Repro (see
+# lock_repro.sh style test): created $LOCKDIR with no pid file (simulating
+# a holder killed in the gap), then ran acquire_lock() against it - it hit
+# the 30-try timeout and gave up with the lock dir STILL orphaned and no
+# pid file, confirmed by checking `[ -d "$LOCKDIR" ] && [ ! -f
+# "$LOCKDIR/pid" ]` afterward: true. For acquire_lock this means every
+# subsequent --background/--stop/--status dies with "Timed out..." forever;
+# for acquire_alert_lock (below) it means every future notify() alert
+# silently gives up forever - until something manually rmdir's the lock or
+# the device reboots. Fixed by adding a second staleness signal alongside
+# the existing dead-PID one: if the lock dir has no pid file yet AND is
+# already older than a couple seconds (the real gap between mkdir and the
+# pid write is a single fast local write, near-instant - never legitimately
+# multiple seconds), treat it as orphaned too. `date -r DIR +%s` for the
+# dir's mtime is the same portable-mtime idiom sniff.sh's own USB_A hint
+# staleness check already uses in this codebase.
+#
+# BUG FOUND AND FIXED (bug-hunt pass, same root cause pid_running() in
+# lib/common.sh was already hardened against): a bare `kill -0 "$holder"`
+# only proves SOME process currently has that PID, not that it's still the
+# SAME process that wrote the lock. If a holder dies without releasing
+# (SIGKILL mid-cycle) and its PID gets reused by an unrelated process
+# before a waiter's kill -0 check runs, the lock would be wrongly treated
+# as still legitimately held forever - exactly the scenario pid_running()'s
+# own header comment documents and guards against via a NAME_PATTERN check
+# against /proc/PID/cmdline. These two lock functions had the bare, older
+# version of that same check. Fixed the same way: when the holder PID is
+# alive, also confirm /proc/$holder/cmdline still mentions usb_monitor.sh
+# before trusting it - a live-but-unrelated process reusing the old PID no
+# longer passes, and gets cleaned up as stale instead. Fails open (skips
+# the extra check, keeps old kill-0-only behavior) if /proc/PID/cmdline
+# isn't readable, same as pid_running() does.
 LOCKDIR="/tmp/pager-usbmon.lock"
+_lock_holder_stale() {
+    # $1 = lock dir, $2 = holder pid (may be empty)
+    local dir="$1" holder="$2" mtime now
+    if [ -z "$holder" ]; then
+        mtime=$(date -r "$dir" +%s 2>/dev/null)
+        case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+        now=$(date +%s)
+        [ "$now" -ge "$mtime" ] && [ $((now - mtime)) -ge 2 ] && return 0
+        return 1
+    fi
+    if ! kill -0 "$holder" 2>/dev/null; then
+        return 0
+    fi
+    if [ -r "/proc/$holder/cmdline" ] && ! tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | grep -qF "usb_monitor.sh"; then
+        return 0
+    fi
+    return 1
+}
 acquire_lock() {
     local tries=0 holder
     while ! mkdir "$LOCKDIR" 2>/dev/null; do
         tries=$((tries + 1))
         [ "$tries" -ge 30 ] && die "Timed out waiting for another usb_monitor.sh --background/--stop/--status to finish (lock: $LOCKDIR)."
         holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
-        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+        if _lock_holder_stale "$LOCKDIR" "$holder"; then
             rm -f "$LOCKDIR/pid" 2>/dev/null
             rmdir "$LOCKDIR" 2>/dev/null
             continue
@@ -171,6 +251,54 @@ acquire_lock() {
     echo $$ > "$LOCKDIR/pid" 2>/dev/null
 }
 release_lock() { rm -f "$LOCKDIR/pid" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+
+# A second, independent lock (same mkdir-atomic, stale-holder-self-healing
+# shape as the one just above) serializing notify()'s alert cycles - see
+# notify()'s own comment for why. Deliberately NOT the same $LOCKDIR: that
+# one guards --background/--stop/--status against each other, a completely
+# different critical section - sharing it would make an attach/detach
+# alert wait behind an unrelated --status call, and vice versa, for no
+# reason. Non-fatal timeout (unlike acquire_lock's die()): this runs from
+# inside a background notify() subshell, not a one-shot CLI invocation -
+# giving up on showing ONE alert if the lock is somehow stuck is fine,
+# killing the whole daemon over it is not.
+ALERT_LOCKDIR="/tmp/pager-usbmon-alert.lock"
+# BUG FOUND AND FIXED (bug-hunt pass, CRITICAL) - see the matching fix on
+# acquire_lock() above for the full trace/repro: the same mkdir-then-
+# pid-write TOCTOU gap and the same bare-kill-0 PID-reuse blind spot exist
+# here too, and share the same _lock_holder_stale() fix. Consequence here
+# is quieter than acquire_lock's (no die(), just a non-fatal `return 1`),
+# but worse in effect: once $ALERT_LOCKDIR wedges this way, EVERY future
+# attach/detach ALERT silently gives up forever with no error surfaced
+# anywhere an operator would see it - exactly the kind of silent-regression
+# this file's own long history of "still don't see a message" reports has
+# already been burned by more than once.
+acquire_alert_lock() {
+    local tries=0 holder
+    while ! mkdir "$ALERT_LOCKDIR" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && return 1
+        holder=$(cat "$ALERT_LOCKDIR/pid" 2>/dev/null)
+        if _lock_holder_stale "$ALERT_LOCKDIR" "$holder"; then
+            rm -f "$ALERT_LOCKDIR/pid" 2>/dev/null
+            rmdir "$ALERT_LOCKDIR" 2>/dev/null
+            continue
+        fi
+        sleep 0.1
+    done
+    # Uses $BASHPID, not $$: this is always called from inside a
+    # `( ... ) &` subshell (notify()'s alert-cycle block) - bash's $$
+    # does NOT update inside a plain subshell, it still reports the
+    # PARENT script's PID (verified live: `bash -c '( echo $$ $BASHPID
+    # ) &'` prints two different numbers). Recording $$ here would make
+    # every alert cycle's lock claim to be held by the long-lived main
+    # daemon process, which is always alive - permanently defeating the
+    # stale-holder self-healing above, since a genuinely-dead subshell
+    # would never be detected as dead.
+    echo "$BASHPID" > "$ALERT_LOCKDIR/pid" 2>/dev/null
+    return 0
+}
+release_alert_lock() { rm -f "$ALERT_LOCKDIR/pid" 2>/dev/null; rmdir "$ALERT_LOCKDIR" 2>/dev/null; }
 
 if [ "$DO_STATUS" = "1" ]; then
     acquire_lock
@@ -183,11 +311,48 @@ if [ "$DO_STATUS" = "1" ]; then
     exit 0
 fi
 
+# BUG FOUND AND FIXED (fresh bug-hunt pass, CRITICAL - traced against a real
+# caller, not a hypothetical): this used to send the kill signal and
+# IMMEDIATELY declare "Stopped." / remove $PIDFILE / release the lock -
+# with nothing checking that the old process had actually exited yet.
+# SIGTERM only gets acted on between iterations of run_monitor's own loop
+# (see notify()'s and this file's own comments on how long a single
+# iteration's synchronous work - say()+LOG's timeout, describe_usb_device's
+# retries, multiple notify() calls stacking - can take), so the real process
+# can still be alive and mid-iteration for several seconds after --stop
+# returns. That window matters because it isn't hypothetical: setup.py's
+# own redeploy flow (see BACKGROUND block's header comment below) does
+# EXACTLY "--stop" immediately followed by "--background" with nothing
+# waiting in between whenever this script's own content changed - precisely
+# the kind of back-to-back invocation an active bug-hunt/redeploy session
+# does all night. If the old process is still alive when the new
+# --background launches, the new PIDFILE write clobbers the old one -
+# recreating the exact "permanently UNTRACKED duplicate daemon, doubled
+# notifications/log lines until reboot" failure mode this file's own
+# LOCKDIR comment already documents as CRITICAL, just reached via --stop's
+# own false confirmation instead of a --background/--background race.
+# Fixed by actually waiting (bounded, ~5s via kill -0 polling - the same
+# primitive pid_running()/the lock's stale-holder check already use) for
+# the PID to disappear before believing the stop worked, escalating to
+# SIGKILL as a last resort if it still hasn't exited - so "Stopped." (and
+# the PIDFILE removal/lock release that follow it) is only ever said once
+# the old process is actually, verifiably gone, not just asked to be.
 if [ "$DO_STOP" = "1" ]; then
     acquire_lock
     trap release_lock EXIT
     if is_running; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null
+        _stop_pid="$(cat "$PIDFILE")"
+        kill "$_stop_pid" 2>/dev/null
+        _stop_tries=0
+        while kill -0 "$_stop_pid" 2>/dev/null && [ "$_stop_tries" -lt 20 ]; do
+            _stop_tries=$((_stop_tries + 1))
+            sleep 0.25
+        done
+        if kill -0 "$_stop_pid" 2>/dev/null; then
+            err "PID $_stop_pid didn't exit within 5s of SIGTERM - sending SIGKILL."
+            kill -9 "$_stop_pid" 2>/dev/null
+            sleep 0.25
+        fi
         rm -f "$PIDFILE"
         say "Stopped."
     else
@@ -264,7 +429,35 @@ notify() {
     # legitimately report on the same physical USB-A event) can tell which
     # independent script a line came from. This was the untagged half of
     # that fix.
-    command -v LOG >/dev/null 2>&1 && timeout 5 LOG "[usb_monitor.sh] $1" >/dev/null 2>&1
+    #
+    # BUG FOUND AND FIXED (bug-hunt pass, run_monitor detection-latency:
+    # verified with a standalone repro): notify() is called SYNCHRONOUSLY
+    # from inside run_monitor's own detection loop (for USB-C/USB-A state
+    # changes) before that same loop iteration goes on to do its dmesg-diff
+    # work and the next-iteration sleep. This `timeout 5 LOG ...` call ran
+    # in the foreground right here - bounded by `timeout`, but "bounded"
+    # still means up to 5 REAL seconds of the loop doing nothing else if LOG
+    # is ever slow/wedged (the same class of on-device IPC hang this file's
+    # own comment two paragraphs up already documents LOG as capable of).
+    # Repro: a fake LOG() that never returns on its own, called the exact
+    # same way (`timeout N LOG ...`) - the calling script was measurably
+    # blocked for the full timeout duration (2s in the repro, 5s for real)
+    # before the next statement ran. Since a single loop iteration can call
+    # notify() more than once (e.g. USB-C AND USB-A both changed in the same
+    # 2s tick), those delays stack, directly postponing this SAME script's
+    # own dmesg-diff check and its own next carrier poll - a real, code-
+    # level source of detection latency independent of the platform's own
+    # ALERT-queue behavior. Fixed by backgrounding this call too (same
+    # `( ... ) & disown` shape already used for the ALERT cycle below) so a
+    # slow/wedged LOG can no longer delay this process's own detection loop
+    # - it was already non-essential to serialize (each LOG call writes an
+    # independent, self-contained line to the on-device log view; unlike
+    # ALERT there's no shared on-screen state to protect between calls, so
+    # no lock is needed here, just non-blocking dispatch).
+    if command -v LOG >/dev/null 2>&1; then
+        ( timeout 5 LOG "[usb_monitor.sh] $1" >/dev/null 2>&1 ) &
+        disown 2>/dev/null
+    fi
 
     # BUG FOUND AND FIXED (CRITICAL, live-reported - "unplugged/replugged
     # both ports, no message shown on screen"): LOG never had a real
@@ -292,45 +485,96 @@ notify() {
     # payload running either) - so it was never actually true that NO
     # on-screen text works standalone, only that LOG specifically doesn't.
     #
-    # BUG FOUND AND FIXED (live-reported follow-up): the first version of
-    # this fix fired ALERT synchronously and relied on ALERT's own
-    # confirmed-nonexistent duration parameter - live testing showed a
-    # detach event's ALERT could sit on screen, apparently blocking/
-    # queuing behind it, until the NEXT event (e.g. the matching re-
-    # attach) finally pushed both through together - the platform-queuing
-    # behavior this codebase's own postmortems already documented for
-    # ALERT elsewhere. Fixed two ways: (1) fire ALERT in a backgrounded
-    # subshell instead of inline, so notify() and run_monitor's main loop
-    # are never blocked waiting on it, and (2) actually dismiss it ~1.5s
-    # later instead of leaving it queued indefinitely - via
-    # lib/dismiss_alert.py, a small script built specifically for this
-    # (there is no official API for it - confirmed live: no BUTTON_PRESS
-    # binary exists despite being listed in Hak5's generic docs, and
-    # ALERT itself has no duration/timeout parameter). It works by talking
-    # directly to the same local WebSocket (/tmp/api.sock,
-    # /api/pager/input/keys.ws) the physical A/B buttons and the Virtual
-    # Pager web app's own on-screen buttons use - reverse-engineered live
-    # by reading that web app's own JavaScript, not guessed. Verified live
-    # repeatedly: fire ALERT, wait 1.5s, send "Enter" through the script -
-    # the alert reliably disappears with no physical button press.
+    # BUG FOUND AND FIXED (live-reported follow-up, round 2): the first
+    # version of this fix fired ALERT synchronously and relied on ALERT's
+    # own confirmed-nonexistent duration parameter - fixed by backgrounding
+    # the whole "show, wait, dismiss" sequence and building a real dismiss
+    # (lib/dismiss_alert.py). That fix alone still wasn't enough for two
+    # events close together (e.g. a quick unplug/replug) - live-reproduced
+    # with two ALERT calls fired 1.2s apart with nothing else running: the
+    # SECOND one rendered FIRST, then the first rendered after, and neither
+    # auto-dismissed - the platform's own alert queue does not preserve
+    # firing order, and two independently-timed "wait N seconds after MY
+    # OWN alert, then send one dismiss" subshells have no way to know which
+    # physical alert is actually on screen when the platform itself
+    # reorders them. A per-call timer literally cannot fix this - the fix
+    # has to stop TWO alert cycles from ever being in flight at once.
     #
-    # Only fired for the two events that were actually reported as missing
-    # - a full attach or a full detach - not for the finer-grained
-    # "detected but link down" sub-state, which stays LOG-only (a lower-
-    # severity partial-connection state didn't seem worth the same
-    # disruption cost as a full plug event; revisit if that's wrong in
-    # practice). Matched on the message text (not a separate parameter
-    # threaded through every one of this function's 6 call sites) since
-    # the message vocabulary is small, fixed, and entirely under this
-    # file's own control.
+    # Fixed by serializing every alert cycle behind ALERT_LOCKDIR (same
+    # mkdir-is-atomic, stale-holder-self-healing lock shape already proven
+    # for this file's own --background/--stop/--status lock above, just a
+    # second, independent lock for a different critical section - reusing
+    # the SAME lock would make an attach event wait behind an unrelated
+    # --status call and vice versa). A second event fired while the first
+    # is still mid-cycle now genuinely waits for the first's full show-then-
+    # dismiss to finish before showing its own - guaranteeing at most one
+    # alert on screen at a time, in the order notify() was actually called,
+    # with every single one actually getting dismissed.
     case "$1" in
         *"attached"*|*"detached"*)
             if command -v ALERT >/dev/null 2>&1; then
                 (
+                    acquire_alert_lock || exit 0
+                    trap release_alert_lock EXIT
+                    # REVERTED (live-reported regression): a theory that the
+                    # physical screen might be asleep led to adding an
+                    # ENABLE_DISPLAY call here - live testing showed this
+                    # instead triggered a full "Initializing system" splash/
+                    # re-init sequence, a real new problem, not a fix. Pulled
+                    # back out. The out-of-order/delayed display issue is
+                    # still open - see the next fix attempt below/in later
+                    # commits for what actually addressed it, or if none yet,
+                    # treat this as the last known-good state to build from.
+                    #
+                    # BUG FOUND AND FIXED (live-reported follow-up, round 3 -
+                    # ROOT CAUSE FOUND, not another guess this time): even
+                    # with this lock guaranteeing only one ALERT cycle runs
+                    # at a time, a detach fired well before a replug still
+                    # showed nothing until the replug's own attach event
+                    # fired, then both appeared together, reversed. The
+                    # diagnostic timestamps this round added (kept below,
+                    # they're cheap and still useful) caught the real cause
+                    # directly from a live log, not a new theory: a single
+                    # detach event's FULL lock-held cycle (fire, wait
+                    # ALERT_AUTODISMISS_SECS, send 3 dismiss attempts 0.4s
+                    # apart) took a measured 20 SECONDS start to finish -
+                    # `lock-acquired` at :48, `lock-releasing` at :08 the
+                    # next minute. Timed the actual cost directly on-device:
+                    # a single LD_LIBRARY_PATH=/mmc/usr/lib
+                    # /mmc/usr/bin/python3.11 invocation of dismiss_alert.py
+                    # took 1.78s in isolation (measured with `time`), almost
+                    # certainly worse under the real contention of a genuine
+                    # topology-change event (br-lan reconfiguring, this
+                    # script's own poll loop also running) - three of those
+                    # per event, added specifically to defend against the
+                    # platform maybe queuing/reordering alerts, multiplied
+                    # that into the ~20s that made the lock block a second
+                    # real event for far longer than any reasonable gap
+                    # between two physical actions. The "platform reorders
+                    # alerts" theory wasn't wrong on its own (confirmed
+                    # separately, firing two raw ALERT calls 1.2s apart with
+                    # no lock at all also reordered) - but the fix for it
+                    # (three dismiss attempts) cost far more than the
+                    # problem it was guarding against, and that cost is what
+                    # actually produced this exact symptom. No unix-socket-
+                    # capable nc/socat exists on this device (checked) to
+                    # avoid the python3 startup cost entirely, so cut the
+                    # burst back to a single dismiss attempt instead -
+                    # matches the original single-dismiss design that was
+                    # confirmed working live before this file ever added the
+                    # burst, at roughly 1/3 the lock-held time.
+                    _dbg="/tmp/pager-usbmon-alert-debug.log"
+                    echo "$(date '+%H:%M:%S.%N') lock-acquired msg=[$1]" >>"$_dbg" 2>/dev/null
                     timeout 5 ALERT "[usb_monitor.sh] $1" >/dev/null 2>&1
+                    _alert_rc=$?
+                    echo "$(date '+%H:%M:%S.%N') alert-call-returned rc=$_alert_rc" >>"$_dbg" 2>/dev/null
                     sleep "$ALERT_AUTODISMISS_SECS"
-                    _py=$(resolve_python3 2>/dev/null) || exit 0
-                    timeout 5 $_py "$SCRIPT_DIR/lib/dismiss_alert.py" Enter >/dev/null 2>&1
+                    _py=$(resolve_python3 2>/dev/null)
+                    if [ -n "$_py" ]; then
+                        timeout 5 $_py "$SCRIPT_DIR/lib/dismiss_alert.py" Enter >/dev/null 2>&1
+                        echo "$(date '+%H:%M:%S.%N') dismiss-sent" >>"$_dbg" 2>/dev/null
+                    fi
+                    echo "$(date '+%H:%M:%S.%N') lock-releasing" >>"$_dbg" 2>/dev/null
                 ) &
                 disown 2>/dev/null
             fi
@@ -399,13 +643,42 @@ usb_vendor_name() {
 # vendor:product hex ID if not in the small table above) as the device
 # name, and the chipset manufacturer/product string as the type in
 # parens, e.g. "NETGEAR (0846:9060) (MediaTek Inc. Wireless_Device)".
+# BUG FOUND AND FIXED (fresh bug-hunt pass, "device disappears mid-lookup"
+# edge case - verified with a standalone repro before touching this file):
+# each retry iteration reassigned vid/pid/mfr/prod straight from `cat`
+# with NO guard against a read that comes back empty - so a device that
+# disappears (or has a transient sysfs read glitch) partway through the
+# retry window didn't just fail to make PROGRESS, it actively ERASED
+# already-good data from an earlier iteration. Concretely: try 1 reads a
+# perfectly valid idVendor (e.g. "0846") but `product` is still empty
+# (sysfs hasn't finished populating yet, the exact case these retries
+# exist for) - the loop correctly continues: `[ -n "$vid" ] && [ -n
+# "$prod" ]` is false. But if the device is gone (or that one file glitches)
+# on try 2, `vid=$(cat .../idVendor)` returns "" and OVERWRITES the good
+# "0846" from try 1 with an empty string - by try 5 `vid` is empty even
+# though it was successfully read moments earlier, so `[ -z "$vid" ] &&
+# return 1` fires and this reports total failure (falling back to the
+# generic "USB-A: device attached" message) despite having had enough
+# data for a real one. Repro: simulated try 1 returning a valid
+# vid/pid/mfr with the (real, common) "product still empty" case, then
+# every subsequent try returning nothing (device vanished) - the
+# unguarded version's `vid` ends up empty and returns 1, discarding the
+# good try-1 read entirely. Fixed by only ever overwriting a field when
+# the fresh read actually returned something, so a later empty/failed
+# read can no longer blank out data a prior, successful read already
+# captured - each field independently keeps the last non-empty value seen
+# across the whole retry window.
 describe_usb_device() {
-    local path="$1" tries=0 vid="" pid="" mfr="" prod=""
+    local path="$1" tries=0 vid="" pid="" mfr="" prod="" _v _p _m _pr
     while [ "$tries" -lt 5 ]; do
-        vid=$(cat "/sys/bus/usb/devices/$path/idVendor" 2>/dev/null)
-        pid=$(cat "/sys/bus/usb/devices/$path/idProduct" 2>/dev/null)
-        mfr=$(cat "/sys/bus/usb/devices/$path/manufacturer" 2>/dev/null)
-        prod=$(cat "/sys/bus/usb/devices/$path/product" 2>/dev/null)
+        _v=$(cat "/sys/bus/usb/devices/$path/idVendor" 2>/dev/null)
+        _p=$(cat "/sys/bus/usb/devices/$path/idProduct" 2>/dev/null)
+        _m=$(cat "/sys/bus/usb/devices/$path/manufacturer" 2>/dev/null)
+        _pr=$(cat "/sys/bus/usb/devices/$path/product" 2>/dev/null)
+        [ -n "$_v" ] && vid="$_v"
+        [ -n "$_p" ] && pid="$_p"
+        [ -n "$_m" ] && mfr="$_m"
+        [ -n "$_pr" ] && prod="$_pr"
         [ -n "$vid" ] && [ -n "$prod" ] && break
         tries=$((tries + 1))
         sleep 0.3
