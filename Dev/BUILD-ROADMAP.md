@@ -55,7 +55,7 @@ offload).
 - [H] **U4** Network topology mapper  (topomap.sh: passive LLDP/CDP + gateway MAC/TTL + traceroute hop-count + ARP -> classified tree; wired in Controller LAN)
 
 ## Cluster G — Bettercap & Wifite (build LAST)
-- [ ] **BC1** bettercap (Go) + bettercap.sh  (clone github.com/bettercap/bettercap, build/port MIPS)
+- [~] **BC1** bettercap (Go) + bettercap.sh  (wrapper + --build recipe done: installs golang/gcc, fetches libpcap headers by hand (no -dev pkg), cgo-builds to /mmc/go/bin; on-device build in progress - heavy on 251MB RAM, may need retry. Core abilities already covered natively by deadnet/sniff/stealthnet/dnsspoof/airscout/deauth/bluetooth.)
 - [x] **WF1** wifite2 (Python) + wifite2.sh  (cloned to /mmc/wifite2, runs under python3.11 - banner+help verified live; wrapper sets env + steers to external adapter; --install self-provisions; wired in Controller WiFi as auto-audit/pillage)
 
 ## Notes
