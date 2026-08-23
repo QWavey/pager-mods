@@ -1,7 +1,7 @@
 PAGER — RED-TEAM LOADOUT (approved ideas)
 ============================================
 Generated        : Sun Aug 23 2026 21:46:19 GMT+0200 (Mitteleuropäische Sommerzeit)
-Approved count   : 27
+Approved count   : 27 (+ post-HTML ideas below)
 
 ## Dual-radio ops — internal + external A8000 at once
   [DR7] Capture while cracking  [dual-radio,keys]
@@ -67,4 +67,50 @@ Approved count   : 27
   [C5] Loot meter  [on-device]
         Running tally of keys / hashes / creds / access so you know when you've got enough to pull out.
 
--- end --
+-- end of HTML loadout --
+
+
+############################################################
+# POST-HTML IDEAS (added after the picker)
+# BUILD ORDER (user): 1) the 27 HTML ideas  2) these  3) bettercap + wifite
+############################################################
+
+## USB-C host-side / device-identity ops (Pager plugged into a target PC via USB-C)
+  [U1] USB-C device clone (whitelist bypass)  [access]
+        Present to the PC as a normal wired device (FritzBox-style), enumerate
+        everything the PC hands the device over USB-C (MAC, DHCP identity,
+        hostname, vendor), then prompt "got all the info - clone it to look
+        like this device?" After cloning, the Pager carries the SAME identity
+        onto the LAN. Use case: a whitelisted school PC (its NIC is allowed,
+        yours isn't) - clone it, then plug the Pager into the school LAN with
+        the whitelisted identity for internet access. Flow: unplug LAN from the
+        PC -> plug USB-C into the PC (PC leaks its identity to the Pager) ->
+        unplug -> plug the Pager into the school LAN as that device.
+
+  [U2] DNS walled-garden redirect  [MITM]
+        With the PC tethered over USB-C and the Pager on the LAN (bridge-like),
+        run a DNS resolver that answers every lookup with ONE allowed page
+        (local or a real internet page) and blocks the rest - a captive
+        walled garden for the tethered host.
+
+  [U3] Stealth intercept ("hanging" internet)  [MITM,stealth]
+        Make the PC look like it has no/broken internet (requests appear to
+        hang) while the Pager silently forwards the traffic to the internet,
+        receives the responses, and withholds them from Windows - full silent
+        interception with a plausible "network's down" cover story.
+
+  [U4] Network topology mapper  [intel]
+        Map the path from our LAN drop upwards: LAN -> switch -> router, or
+        LAN -> wifi-router / repeater. Distinguish switch vs. repeater vs.
+        gateway (TTL/hop analysis, LLDP/CDP, ARP, traceroute) and draw the tree.
+
+## Bettercap & Wifite integration (build LAST)
+  [BC1] bettercap + bettercap.sh wrapper  [MITM,creds]
+        Install bettercap (Go - github.com/bettercap/bettercap, build/port for
+        MIPS) and write bettercap.sh to drive it well on the Pager.
+  [WF1] wifite2 + wifite2.sh wrapper  [keys]
+        Install wifite2 (Python - github.com/derv82/wifite2) and write
+        wifite2.sh to drive it. NOTE: both are other-language projects - clone
+        the repos to the PC and convert/port as needed for the Pager.
+
+-- end (NOT, LOOK AFTER IT) --

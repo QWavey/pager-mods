@@ -20,7 +20,7 @@ offload).
 - [H] **DR7** Capture-while-cracking  (wifikit.sh --background capture + --crack against growing file)
 
 ## Cluster B — WiFi offense (mostly exist or thin)
-- [ ] **W5** WPS Pixie-Dust  (needs reaver/bully — confirm opkg; else scapy)
+- [H] **W5** WPS Pixie-Dust  (wpskit.sh: wash scan validated live + reaver pixie; attack needs A8000/target — wired in Controller)
 - [x] **W6** Targeted deauth  (deauth.sh — wired in Controller)
 - [x] **W7** SSID beacon flood  (ssidpool.sh — wired)
 - [ ] **W8** Client-isolation tester  (probe peer reachability on the AP subnet)
@@ -47,6 +47,16 @@ offload).
 
 ## Cluster E — Implant / C2
 - [ ] **I1** USB-C gadget drop (PoisonTap)  (USB Ethernet gadget + DHCP/route/DNS trap) [H]
+
+## Cluster F — POST-HTML ideas (build after the 27)
+- [ ] **U1** USB-C device clone / whitelist bypass  (enumerate what the PC presents over USB-C gadget, clone identity onto LAN) [H]
+- [ ] **U2** DNS walled-garden redirect  (dnsmasq: answer all lookups with one allowed page; USB-C host bridged to LAN)
+- [ ] **U3** Stealth intercept ("hanging" internet)  (silent forward+withhold; nft/tc + proxy)
+- [ ] **U4** Network topology mapper  (TTL/hop, LLDP/CDP, ARP, traceroute → switch/repeater/router tree)
+
+## Cluster G — Bettercap & Wifite (build LAST)
+- [ ] **BC1** bettercap (Go) + bettercap.sh  (clone github.com/bettercap/bettercap, build/port MIPS)
+- [ ] **WF1** wifite2 (Python) + wifite2.sh  (clone github.com/derv82/wifite2, port)
 
 ## Notes
 - Cracking on-box: aircrack-ng dictionary against a small wordlist; big cracks
