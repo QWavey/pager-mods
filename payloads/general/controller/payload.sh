@@ -120,8 +120,17 @@ theme_wifi() {
 # -- LAN --------------------------------------------------------------------
 theme_lan() {
     local a
-    a=$(LIST_PICKER "LAN" "Deep scan" "DNS spoof" "LAN kill (DeadNet)" "Back" "Deep scan") || return
+    a=$(LIST_PICKER "LAN" "Deep scan" "Auto-pwn (deep)" "DNS spoof" "LAN kill (DeadNet)" "Back" "Deep scan") || return
     case "$a" in
+    "Auto-pwn (deep)")
+        need lanpwn.sh || return
+        CONFIRMATION_DIALOG "Discover the wired LAN (eth1), scan services, then try default creds + SMB loot + NSE? Authorized network only!" || return
+        LOG "Auto-pwn running over eth1 - discovery, service scan, NSE, default-creds, SMB loot. This can take several minutes..."
+        local out
+        out=$("$S/lanpwn.sh" --auto --iface eth1 -y 2>&1)
+        LOG "$out"
+        ALERT "Auto-pwn done - see log + /root/loot/lanpwn/"
+        ;;
     "Deep scan")
         need LanScan.sh || return
         local mode
