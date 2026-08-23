@@ -13,17 +13,29 @@
 # 30-day/100M ceilings), --bridge's same-interface and --dhcp-without-
 # --bridge rejections, the ICMP/IPv6 source-IP port-stripping fix, the STP-
 # vs-TCP protocol misclassification fix, watcher_block_bounds' empty/
-# out-of-range fallback fix, and pid_running's PID-reuse guard.
+# out-of-range fallback fix, pid_running's PID-reuse guard, kill_tracked_
+# pid's own PID-reuse-guarded kill-and-forget behavior (missing/stale
+# pidfile, live-and-matching, live-but-non-matching), reap_orphaned_
+# tcpdump_rescans' ps-output filtering (kills only "tcpdump ... -r ..."
+# rescans, leaves a live "-i/-w" capture alone, and - the actual reason
+# that function greps with `grep -v grep` - never kills its own grep
+# process even though that process's own argv literally contains the
+# search pattern text), and the CREDS_PATTERN/HTTP_PATTERN regexes
+# themselves, exercised directly against sample text.
 #
 # WHAT THIS DOES NOT COVER: anything requiring a real tcpdump capture or a
 # real wired interface - the --bridge/--unbridge kernel-facing steps
-# (ip_link calls, actual bridge creation), the watchdog subshells, the
-# live run_creds_watcher/run_packet_feed re-scan loops, --background launch
-# and PID tracking end-to-end, summarize_pcap's actual tcpdump -A/-nn
+# (ip_link calls, actual bridge creation), the watchdog subshells (including
+# the USB_A_STATEFILE freshness hint inside start_lan_watchdog, which is
+# inline loop code rather than a standalone function), the live run_creds_
+# watcher/run_packet_feed re-scan loops, --background launch and PID
+# tracking end-to-end, and summarize_pcap's actual tcpdump -A/-nn
 # invocations (only the pure classification/extraction functions it calls
-# are covered), and the "cleartext credential" CREDS_PATTERN/HTTP_PATTERN
-# regexes themselves (not exercised here). Those all need the real device
-# or at least a real tcpdump binary and are out of scope for this pass.
+# are covered - though the CREDS_PATTERN/HTTP_PATTERN regexes those calls
+# feed through, shared with run_creds_watcher, ARE now exercised directly
+# against sample text, extracted straight from the source). Those all need
+# the real device or at least a real tcpdump binary and are out of scope
+# for this pass.
 #
 # Usage: bash scripts/tests/test_sniff_logic.sh
 # Exit code: 0 if every check passed, 1 if any failed (prints a summary
@@ -73,7 +85,7 @@ extract_func() {
 [ -f "$COMMON_SH" ] || { echo "Cannot find lib/common.sh at $COMMON_SH"; exit 1; }
 
 echo "== Extracting pure-logic functions from $(basename "$SNIFF_SH") =="
-for fn in extract_src_ips classify_protocols watcher_block_bounds; do
+for fn in extract_src_ips classify_protocols watcher_block_bounds kill_tracked_pid reap_orphaned_tcpdump_rescans; do
     src="$(extract_func "$fn" "$SNIFF_SH")"
     if [ -z "$src" ]; then
         echo "Could not extract function '$fn' from sniff.sh - has it been renamed/removed? Aborting."
@@ -183,6 +195,198 @@ if pid_running "$tmp_pidfile"; then
     fail "pid_running reports 'not running' for a missing pidfile" "returned true"
 else
     pass "pid_running reports 'not running' for a missing pidfile"
+fi
+
+echo
+echo "== kill_tracked_pid (shared PID-reuse-guarded kill-and-forget) =="
+# Uses REAL background processes and REAL signals (same convention as the
+# pid_running block above, which already uses real PIDs $$ and 999999) -
+# no stubbing needed since kill_tracked_pid only needs pid_running() (real,
+# sourced from common.sh above) and the real `kill` builtin, both of which
+# behave identically here and on-device.
+
+# Case 1: missing pidfile entirely must be a safe no-op (matches every
+# original call site's own `[ -f "$pidfile" ]` guard, per this function's
+# own header comment - "same 'stale/missing pidfile is a harmless no-op'
+# behavior every original call site already had").
+tmp_pidfile="$(mktemp -u)"
+rm -f "$tmp_pidfile"
+kill_tracked_pid "$tmp_pidfile" "anything"
+if [ -f "$tmp_pidfile" ]; then
+    fail "kill_tracked_pid on a missing pidfile is a safe no-op" "pidfile now exists"
+else
+    pass "kill_tracked_pid on a missing pidfile is a safe no-op"
+fi
+
+# Case 2: a live process whose /proc cmdline DOES contain PATTERN must
+# actually be killed, and the pidfile removed either way.
+probe_script="$(mktemp)"
+printf '#!/bin/bash\nsleep 20\n' > "$probe_script"
+bash "$probe_script" &
+bg_pid=$!
+sleep 0.3
+tmp_pidfile="$(mktemp)"
+echo "$bg_pid" > "$tmp_pidfile"
+# The probe script's own randomly-generated mktemp basename is a pattern
+# guaranteed to appear nowhere else on the system, so matching on it (via
+# pid_running's /proc/$pid/cmdline substring check) can't accidentally
+# match some unrelated live process.
+kill_tracked_pid "$tmp_pidfile" "$(basename "$probe_script")"
+sleep 0.3
+if kill -0 "$bg_pid" 2>/dev/null; then
+    fail "kill_tracked_pid kills a live PID whose cmdline matches PATTERN" "process $bg_pid still alive"
+    kill "$bg_pid" 2>/dev/null
+else
+    pass "kill_tracked_pid kills a live PID whose cmdline matches PATTERN"
+fi
+[ -f "$tmp_pidfile" ] && fail "kill_tracked_pid removes the pidfile after a matching kill" "pidfile still present" \
+    || pass "kill_tracked_pid removes the pidfile after a matching kill"
+rm -f "$probe_script"
+
+# Case 3: the actual PID-reuse guard this function exists for - a live
+# process whose cmdline does NOT contain PATTERN must be LEFT RUNNING (not
+# blind-killed just because its number is sitting in the pidfile), even
+# though the pidfile itself is still cleaned up.
+probe_script="$(mktemp)"
+printf '#!/bin/bash\nsleep 20\n' > "$probe_script"
+bash "$probe_script" &
+bg_pid=$!
+sleep 0.3
+tmp_pidfile="$(mktemp)"
+echo "$bg_pid" > "$tmp_pidfile"
+kill_tracked_pid "$tmp_pidfile" "definitely-not-a-real-cmdline-substring-xyz"
+if kill -0 "$bg_pid" 2>/dev/null; then
+    pass "kill_tracked_pid does NOT kill a live PID whose cmdline doesn't match PATTERN (reuse guard)"
+else
+    fail "kill_tracked_pid does NOT kill a live PID whose cmdline doesn't match PATTERN (reuse guard)" "process $bg_pid was killed anyway"
+fi
+[ -f "$tmp_pidfile" ] && fail "kill_tracked_pid still removes the pidfile even on a non-matching PID" "pidfile still present" \
+    || pass "kill_tracked_pid still removes the pidfile even on a non-matching PID"
+# Cleanup: this probe process was deliberately left running by the guard
+# just proven above - stop it for real now, not part of the check itself.
+kill "$bg_pid" 2>/dev/null
+rm -f "$probe_script"
+
+# Case 4: a stale pidfile (PID not running at all) must not error, and
+# must still be removed.
+tmp_pidfile="$(mktemp)"
+echo "999999" > "$tmp_pidfile"
+kill_tracked_pid "$tmp_pidfile" "anything"
+[ -f "$tmp_pidfile" ] && fail "kill_tracked_pid removes a stale (not-running) pidfile" "pidfile still present" \
+    || pass "kill_tracked_pid removes a stale (not-running) pidfile"
+
+echo
+echo "== reap_orphaned_tcpdump_rescans (ps-output filtering, incl. self-exclusion) =="
+# Stubs `ps` and `kill` as plain shell functions for the duration of this
+# block only (same technique test_payload_logic.sh uses to stub LIST_
+# PICKER/NUMBER_PICKER) - a defined function takes priority over both an
+# external command (ps) and a shell builtin (kill) for a bare, unqualified
+# call, so the real extracted reap_orphaned_tcpdump_rescans() body drives
+# these fakes exactly as it would drive the real commands on-device,
+# without this test needing to spawn/rename real processes (this device's
+# own `ps` output format - COMMAND is the process's own argv, unlike some
+# other platforms - can't be reproduced by renaming a local test process).
+_reap_killed=""
+kill() { _reap_killed="$_reap_killed $1"; }
+ps() {
+    printf '1001 x x x ? 0 12:00 tcpdump -A -r /root/loot/sniff/cap.pcap\n'
+    printf '1002 x x x ? 0 12:00 tcpdump -i eth1 -w /root/loot/sniff/live.pcap\n'
+    printf '1003 x x x ? 0 12:00 grep -E tcpdump .* -r \n'
+    printf '1004 x x x ? 0 12:00 tcpdump -nn -r /root/loot/sniff/z.pcap\n'
+    printf '1005 x x x ? 0 12:00 sshd: root@pts/0\n'
+}
+reap_orphaned_tcpdump_rescans
+assert_eq "reap_orphaned_tcpdump_rescans kills exactly the two '-r' rescans (1001, 1004)" " 1001 1004" "$_reap_killed"
+unset -f ps kill
+
+_reap_killed=""
+kill() { _reap_killed="$_reap_killed $1"; }
+ps() { printf '2001 x x x ? 0 12:00 tcpdump -i eth1 -w /root/loot/sniff/live.pcap\n'; }
+reap_orphaned_tcpdump_rescans
+assert_eq "reap_orphaned_tcpdump_rescans leaves a live '-i/-w' capture alone (no '-r')" "" "$_reap_killed"
+unset -f ps kill
+
+echo
+echo "== CREDS_PATTERN / HTTP_PATTERN (cleartext-credential/HTTP regexes, exercised directly) =="
+# Pulled straight out of the real source lines (same "tied to current code,
+# not a hand-copied duplicate that could drift" reasoning test_payload_
+# logic.sh already uses for its own CAPTURE_FILE regex extraction) rather
+# than restating the pattern text here - a change to either regex in
+# sniff.sh is automatically exercised by whatever's below, no separate
+# edit needed in this test file. Both summarize_pcap and run_creds_watcher
+# grep these with `-iE` (case-insensitive), so every check below matches
+# that real usage.
+creds_pattern_line=$(grep -n "^CREDS_PATTERN=" "$SNIFF_SH")
+creds_pattern=$(printf '%s' "$creds_pattern_line" | sed -n "s/^[0-9]*:CREDS_PATTERN='\\(.*\\)'\$/\\1/p")
+http_pattern_line=$(grep -n "^HTTP_PATTERN=" "$SNIFF_SH")
+http_pattern=$(printf '%s' "$http_pattern_line" | sed -n "s/^[0-9]*:HTTP_PATTERN='\\(.*\\)'\$/\\1/p")
+
+if [ -z "$creds_pattern" ]; then
+    fail "could extract CREDS_PATTERN from sniff.sh's source" "line was: $creds_pattern_line"
+else
+    pass "extracted CREDS_PATTERN from sniff.sh"
+
+    creds_hit() {
+        # LABEL INPUT - asserts INPUT matches CREDS_PATTERN (case-insensitive,
+        # matching summarize_pcap/run_creds_watcher's own `grep -iE`).
+        if printf '%s\n' "$2" | grep -qiE "$creds_pattern"; then
+            pass "$1"
+        else
+            fail "$1" "expected a CREDS_PATTERN match on: $2"
+        fi
+    }
+    creds_miss() {
+        # LABEL INPUT - asserts INPUT does NOT match CREDS_PATTERN.
+        if printf '%s\n' "$2" | grep -qiE "$creds_pattern"; then
+            fail "$1" "expected NO CREDS_PATTERN match on: $2"
+        else
+            pass "$1"
+        fi
+    }
+
+    creds_hit  "matches an HTTP Basic Auth header (case-insensitive)" "Authorization: Basic QWxhZGRpbjpvcGVuc2VzYW1l"
+    creds_hit  "matches an Authorization: Bearer token" "authorization: bearer abc123.def456"
+    creds_hit  "matches a query-string login (user=...&pass=...)" "GET /login?user=admin&pass=hunter2 HTTP/1.1"
+    creds_hit  "matches a form-body login at the start of a line (passwd=)" "user=alice&passwd=letmein"
+    creds_hit  "matches raw FTP/Telnet USER" "USER anonymous"
+    creds_hit  "matches raw FTP/Telnet PASS" "PASS s3cr3t"
+    creds_hit  "matches a JSON login body's \"password\": field" '  "password": "hunter2"'
+    creds_miss "does not match a plain GET with no credential markers" "GET /index.html HTTP/1.1"
+    # The exact false-positive this pattern's (^|[?&]) prefix requirement
+    # guards against: a query param whose name merely CONTAINS "pass" as a
+    # substring (e.g. "compass") must not be mistaken for a real pass=
+    # credential field just because "pass=" appears mid-word.
+    creds_miss "does not false-positive on 'compass=' (pass= is not at a field boundary)" "compass=32"
+    creds_miss "does not false-positive on 'username=' (user= is not a full field match)" "username=bob"
+fi
+
+if [ -z "$http_pattern" ]; then
+    fail "could extract HTTP_PATTERN from sniff.sh's source" "line was: $http_pattern_line"
+else
+    pass "extracted HTTP_PATTERN from sniff.sh"
+
+    http_hit() {
+        if printf '%s\n' "$2" | grep -qiE "$http_pattern"; then
+            pass "$1"
+        else
+            fail "$1" "expected an HTTP_PATTERN match on: $2"
+        fi
+    }
+    http_miss() {
+        if printf '%s\n' "$2" | grep -qiE "$http_pattern"; then
+            fail "$1" "expected NO HTTP_PATTERN match on: $2"
+        else
+            pass "$1"
+        fi
+    }
+
+    http_hit  "matches a GET request line" "GET /index.html HTTP/1.1"
+    http_hit  "matches a POST request line" "POST /api/login HTTP/1.1"
+    http_hit  "matches a lowercase Host header" "host: example.com"
+    http_hit  "matches a capitalized Host header (case-insensitive)" "Host: example.com"
+    http_miss "does not match an unlisted HTTP verb (PATCH)" "PATCH /resource HTTP/1.1"
+    http_miss "does not match a verb-prefix lookalike with no space before the path (GETX)" "GETX /path"
+    http_miss "does not match a request line with leading whitespace (anchored to line start)" "  GET /path"
 fi
 
 echo

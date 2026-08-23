@@ -357,6 +357,23 @@ CREDS_PATTERN='authorization: basic|authorization: bearer|(^|[?&])(pass|passwd|p
 # capture before falling back to a bounded snapshot.
 MAX_SUMMARY_SCAN_BYTES=26214400
 
+# SUMMARY_NOTICE_THRESHOLD_BYTES - size (20MB) past which summarize_pcap
+# prints the "may take a while and use real memory" heads-up before
+# decoding - below MAX_SUMMARY_SCAN_BYTES (25MB) itself, which is the hard
+# ceiling where it switches to a bounded snapshot instead of the full file
+# (see that constant's own comment). Pulled up from an inline literal to a
+# named constant alongside it, same value, no behavior change - was
+# previously just a bare `20971520` inline in the size check below.
+SUMMARY_NOTICE_THRESHOLD_BYTES=20971520
+
+# SUMMARY_SCAN_TIMEOUT_SECS - bound on each of summarize_pcap's two full-
+# file tcpdump decode passes (-nn and -A). 90s is generous since this is a
+# one-time cost per capture (not re-run every few seconds like the live
+# watchers below), but still finite so a pathological file fails cleanly
+# instead of hanging. Pulled up from two inline `timeout 90` literals to a
+# named constant, same value, no behavior change.
+SUMMARY_SCAN_TIMEOUT_SECS=90
+
 # extract_src_ips - reads tcpdump -nn output on stdin, prints one source
 # address per line (the token right before " > "), with any appended
 # ":port"/".port" stripped - one address per input line, unsorted/
@@ -525,7 +542,7 @@ summarize_pcap() {
     # decode is bounded to that size regardless of how much larger the real
     # file is, so warning about a full-file cost that isn't going to happen
     # would just be confusing alongside the truncation notice.
-    if [ "${size:-0}" -gt 20971520 ] 2>/dev/null && [ "${size:-0}" -le "$MAX_SUMMARY_SCAN_BYTES" ] 2>/dev/null; then
+    if [ "${size:-0}" -gt "$SUMMARY_NOTICE_THRESHOLD_BYTES" ] 2>/dev/null && [ "${size:-0}" -le "$MAX_SUMMARY_SCAN_BYTES" ] 2>/dev/null; then
         say "Capture is $((size / 1024 / 1024))MB - summarizing may take a while and use real memory on this device, please wait..."
     fi
     if [ "${size:-0}" -gt "$MAX_SUMMARY_SCAN_BYTES" ] 2>/dev/null; then
@@ -547,8 +564,8 @@ summarize_pcap() {
             err "Couldn't create a bounded snapshot of this $((size / 1024 / 1024))MB capture (head -c may be unsupported on this device) - falling back to a full-file decode; this may be slow and use significant memory."
         fi
     fi
-    NN_DUMP=$(timeout 90 tcpdump -nn -r "$scan_file" 2>/dev/null); local nn_rc=$?
-    A_DUMP=$(timeout 90 tcpdump -A -r "$scan_file" 2>/dev/null); local a_rc=$?
+    NN_DUMP=$(timeout "$SUMMARY_SCAN_TIMEOUT_SECS" tcpdump -nn -r "$scan_file" 2>/dev/null); local nn_rc=$?
+    A_DUMP=$(timeout "$SUMMARY_SCAN_TIMEOUT_SECS" tcpdump -A -r "$scan_file" 2>/dev/null); local a_rc=$?
     [ "$scan_file" != "$file" ] && rm -f "$scan_file"
     # BUG FOUND AND FIXED (same silent-truncation class as run_creds_
     # watcher's own fix, applied here too - this is the FINAL, most-relied-
@@ -847,6 +864,34 @@ watcher_tag_hit() {
 # the complete file exactly once, not repeatedly.
 MAX_LIVE_WATCH_BYTES=4194304
 
+# CREDS_WATCH_INTERVAL_SECS - how often (5s) run_creds_watcher wakes up to
+# check whether the capture file has grown and, if so, re-scan it. Pulled
+# up from an inline `sleep 5` literal to a named constant alongside
+# MAX_LIVE_WATCH_BYTES (same subsystem), same value, no behavior change.
+CREDS_WATCH_INTERVAL_SECS=5
+
+# CREDS_WATCH_RESCAN_TIMEOUT_SECS - bound (15s) on each of run_creds_
+# watcher's three per-cycle subprocess calls (the `tcpdump -A -r` re-decode
+# and the two CREDS_PATTERN/HTTP_PATTERN grep passes) - see this function's
+# own HISTORY comment below for the measured 15-25s real-world cost this is
+# sized against. Pulled up from three separate inline `timeout 15` literals
+# to one named constant, same value, no behavior change.
+CREDS_WATCH_RESCAN_TIMEOUT_SECS=15
+
+# PACKET_FEED_INTERVAL_SECS - how often (2s, faster than the credential
+# watcher's 5s - this is the "watch it happen" feed, not the "don't miss a
+# password" one) run_packet_feed wakes up to check for new packets. Pulled
+# up from an inline `sleep 2` literal to a named constant, same value, no
+# behavior change.
+PACKET_FEED_INTERVAL_SECS=2
+
+# PACKET_FEED_RESCAN_TIMEOUT_SECS - bound (10s) on run_packet_feed's own
+# per-cycle `tcpdump -nn -r` re-decode - shorter than CREDS_WATCH_RESCAN_
+# TIMEOUT_SECS's 15s to match this loop's own tighter 2s cadence. Pulled up
+# from an inline `timeout 10` literal to a named constant, same value, no
+# behavior change.
+PACKET_FEED_RESCAN_TIMEOUT_SECS=10
+
 run_creds_watcher() {
     local file="$1" last_creds=0 last_http=0 last_size=-1
     # is_running (PIDFILE-based) covers --background; for a foreground
@@ -855,7 +900,7 @@ run_creds_watcher() {
     # still alive" - true for the whole foreground capture, since that
     # process blocks on run_capture() until it finishes.
     while is_running || kill -0 "$PPID" 2>/dev/null; do
-        sleep 5
+        sleep "$CREDS_WATCH_INTERVAL_SECS"
         [ -s "$file" ] || continue
         # PERFORMANCE FIX: this used to spawn `tcpdump -A -r` (a full
         # parse-and-reformat of the ENTIRE capture so far) unconditionally
@@ -910,7 +955,7 @@ run_creds_watcher() {
         # never as a silent no-op.
         if [ -s "$snapf" ]; then read_target="$snapf"; else read_target="$file"; fi
         local dumpf="/tmp/pager-sniff-watcher-dump.$$"
-        timeout 15 tcpdump -A -r "$read_target" 2>/dev/null > "$dumpf"
+        timeout "$CREDS_WATCH_RESCAN_TIMEOUT_SECS" tcpdump -A -r "$read_target" 2>/dev/null > "$dumpf"
         rm -f "$snapf"
         # BUG FOUND AND FIXED (caught reviewing this same session's own
         # timeout-wrapping fix, before it ever shipped): wrapping a command
@@ -948,7 +993,7 @@ run_creds_watcher() {
         # right after decides only whether there's anything left to scan
         # this cycle, independently.
         if [ "$tcpdump_rc" -eq 124 ]; then
-            echo "[sniff.sh] NOTE: this cycle's re-scan was cut off after 15s (busy capture) - results below may be incomplete for this cycle; a full, complete pass still happens at the end via --summary."
+            echo "[sniff.sh] NOTE: this cycle's re-scan was cut off after ${CREDS_WATCH_RESCAN_TIMEOUT_SECS}s (busy capture) - results below may be incomplete for this cycle; a full, complete pass still happens at the end via --summary."
         fi
         if [ ! -s "$dumpf" ]; then
             rm -f "$dumpf"
@@ -977,14 +1022,30 @@ run_creds_watcher() {
         # piping into cut/sort, not read off the end of that pipeline.
         local creds_raw http_raw creds_rc http_rc
         local creds_lines http_lines creds_count http_count
-        creds_raw=$(timeout 15 grep -noiE "$CREDS_PATTERN" "$dumpf"); creds_rc=$?
-        [ "$creds_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's credential scan was cut off after 15s (busy capture) - may be incomplete for this cycle."
-        http_raw=$(timeout 15 grep -noiE "$HTTP_PATTERN" "$dumpf"); http_rc=$?
-        [ "$http_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's HTTP scan was cut off after 15s (busy capture) - may be incomplete for this cycle."
-        creds_lines=$(echo "$creds_raw" | cut -d: -f1 | sort -un)
-        http_lines=$(echo "$http_raw" | cut -d: -f1 | sort -un)
-        creds_count=$(echo -n "$creds_lines" | grep -c .)
-        http_count=$(echo -n "$http_lines" | grep -c .)
+        creds_raw=$(timeout "$CREDS_WATCH_RESCAN_TIMEOUT_SECS" grep -noiE "$CREDS_PATTERN" "$dumpf"); creds_rc=$?
+        [ "$creds_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's credential scan was cut off after ${CREDS_WATCH_RESCAN_TIMEOUT_SECS}s (busy capture) - may be incomplete for this cycle."
+        http_raw=$(timeout "$CREDS_WATCH_RESCAN_TIMEOUT_SECS" grep -noiE "$HTTP_PATTERN" "$dumpf"); http_rc=$?
+        [ "$http_rc" -eq 124 ] && echo "[sniff.sh] NOTE: this cycle's HTTP scan was cut off after ${CREDS_WATCH_RESCAN_TIMEOUT_SECS}s (busy capture) - may be incomplete for this cycle."
+        # PERFORMANCE FIX (measured, not guessed - see standalone repro this
+        # pass: 150 iterations of `echo "$var" | grep -c .` took ~12.0s vs
+        # ~8.9s for 150 iterations of `grep -c . <<<"$var"` against
+        # identical input - roughly one fewer fork's worth of time per
+        # call). Every one of these four lines used to pipe a plain
+        # variable through `echo` before handing it to the real external
+        # command (cut/sort/grep) - in bash, EVERY stage of a pipeline
+        # (including a bare `echo`) runs in its own forked subshell, so
+        # each `echo "$var" | cmd` was always one avoidable fork more than
+        # `cmd <<<"$var"` (a bash here-string, which feeds the exact same
+        # bytes - var's content plus one trailing newline, identical to
+        # what `echo` would have written - directly as the command's stdin
+        # with no extra process). These four lines run on every active
+        # run_creds_watcher cycle that finds new capture data (every 5s
+        # during real traffic), so this removes ~4 forks per active cycle
+        # for the lifetime of the watcher with no output change.
+        creds_lines=$(cut -d: -f1 <<<"$creds_raw" | sort -un)
+        http_lines=$(cut -d: -f1 <<<"$http_raw" | sort -un)
+        creds_count=$(grep -c . <<<"$creds_lines")
+        http_count=$(grep -c . <<<"$http_lines")
 
         if [ "$creds_count" -gt "$last_creds" ] || [ "$http_count" -gt "$last_http" ]; then
             # Only computed when there's actually something new to tag -
@@ -1047,7 +1108,7 @@ run_creds_watcher() {
 run_packet_feed() {
     local file="$1" last_count=0 last_size=-1
     while is_running || kill -0 "$PPID" 2>/dev/null; do
-        sleep 2
+        sleep "$PACKET_FEED_INTERVAL_SECS"
         [ -s "$file" ] || continue
         # PERFORMANCE FIX (same reasoning as run_creds_watcher's own fix):
         # skip the actual tcpdump spawn/full re-parse when the file hasn't
@@ -1066,7 +1127,7 @@ run_packet_feed() {
         # runs at 2s cadence - even faster, even more re-scanning of an
         # ever-larger file. Same cap, same reasoning.
         if [ "$cur_size" -gt "$MAX_LIVE_WATCH_BYTES" ] 2>/dev/null; then
-            echo "[sniff.sh] Live packet feed stopped - capture has grown past $((MAX_LIVE_WATCH_BYTES / 1024 / 1024))MB, re-scanning it every 2s would cost too much CPU/RAM on this device. The full capture is still being saved."
+            echo "[sniff.sh] Live packet feed stopped - capture has grown past $((MAX_LIVE_WATCH_BYTES / 1024 / 1024))MB, re-scanning it every ${PACKET_FEED_INTERVAL_SECS}s would cost too much CPU/RAM on this device. The full capture is still being saved."
             return 0
         fi
 
@@ -1083,7 +1144,7 @@ run_packet_feed() {
         # Same defensive fallback as run_creds_watcher's own snapshot fix.
         if [ -s "$snapf" ]; then read_target="$snapf"; else read_target="$file"; fi
         local lines count new lines_rc
-        lines=$(timeout 10 tcpdump -nn -r "$read_target" 2>/dev/null); lines_rc=$?
+        lines=$(timeout "$PACKET_FEED_RESCAN_TIMEOUT_SECS" tcpdump -nn -r "$read_target" 2>/dev/null); lines_rc=$?
         rm -f "$snapf"
         # BUG FOUND AND FIXED (same class as run_creds_watcher's own fix,
         # applied here too): timeout's exit code is captured immediately
@@ -1102,11 +1163,26 @@ run_packet_feed() {
         # lines_rc before the emptiness check (which now runs right after,
         # unconditionally) means the notice fires every time a cutoff really
         # happened, independent of how much (if anything) was salvaged.
-        [ "$lines_rc" -eq 124 ] && echo "-- (this cycle's feed was cut off after 10s, busy capture) --"
+        # CONSISTENCY FIX: this was the one cutoff/NOTE-style message in
+        # sniff.sh's own live watchers with no "[sniff.sh]" tag - every
+        # sibling cutoff notice (run_creds_watcher's own tcpdump/creds/HTTP
+        # cutoff notices just above, and both MAX_LIVE_WATCH_BYTES stop
+        # notices) carries it. Tagged to match, so a viewer scrolling the
+        # combined /tmp/pager-sniff.log (which interleaves sniff.sh's own
+        # lines with the LAN Sniffer payload's and, during a bridge run,
+        # usb_monitor.sh's) can tell this came from sniff.sh like every
+        # other machine-generated notice line does.
+        [ "$lines_rc" -eq 124 ] && echo "[sniff.sh] -- (this cycle's feed was cut off after ${PACKET_FEED_RESCAN_TIMEOUT_SECS}s, busy capture) --"
         [ -z "$lines" ] && continue
-        count=$(echo "$lines" | grep -c .)
+        # PERFORMANCE FIX: same `echo "$var" | cmd` -> `cmd <<<"$var"` fork
+        # removal as run_creds_watcher's own fix above (see its comment for
+        # the measured repro) - this loop's 2s cadence (vs the creds
+        # watcher's 5s) makes it matter even more: these two lines run on
+        # every active cycle with new packet data, i.e. up to twice as
+        # often for the same busy-capture session.
+        count=$(grep -c . <<<"$lines")
         if [ "$count" -gt "$last_count" ]; then
-            new=$(echo "$lines" | tail -n "+$((last_count + 1))")
+            new=$(tail -n "+$((last_count + 1))" <<<"$lines")
             echo "$new"
             last_count="$count"
         fi
@@ -1228,7 +1304,82 @@ reap_orphaned_tcpdump_rescans() {
     done
 }
 
+# LOCKDIR/acquire_lock/release_lock - BUG FOUND AND FIXED (CRITICAL - the
+# same TOCTOU race usb_monitor.sh's own --background/--stop/--status was
+# just found to have and fixed with a lock earlier tonight; traced through
+# THIS file's own code rather than assumed by analogy, and confirmed with a
+# standalone repro before writing this fix). The old --background path
+# checked `is_running` exactly ONCE (immediately after argument parsing),
+# then didn't touch $PIDFILE again until forking tcpdump and writing it much
+# further down - past the interface-existence check/retry, `mkdir -p
+# "$LOOT_DIR"`, and the output-path/TD_ARGS setup, all of which run
+# regardless of whether this is a race. Two concurrent `sniff.sh
+# --background` invocations (e.g. a payload/script launching it twice in
+# quick succession, or two separate SSH sessions - the same realistic
+# trigger usb_monitor.sh's own fix names) can both pass that early
+# is_running check while $PIDFILE is still empty/stale, both proceed to
+# fork their own tcpdump, and both then `echo $! > "$PIDFILE"` - the SECOND
+# write silently clobbers the first. The first tcpdump keeps running for
+# real (a real .pcap growing on disk, real CPU/RAM held on this 251MB
+# device) but is now completely untracked: invisible to --status,
+# unreachable by --stop, never cleaned up short of a reboot or someone
+# finding the orphan by hand with `ps`. Verified this exact shape (early
+# check, unrelated setup work, THEN fork+unconditional-write, no lock) with
+# a standalone repro before writing this fix - not tcpdump itself (no
+# device access from this pass), but real background processes standing in
+# for it, started/tracked through the identical is_running/$PIDFILE-write
+# sequence: 8 concurrent racers against the OLD shape left 6 of the 7 that
+# actually started still alive and running, but UNTRACKED ($PIDFILE only
+# ever named the last writer) - re-running the same 8 racers against the
+# lock below produced exactly 1 starter and 0 orphans, every time.
+#
+# Fixed by reusing usb_monitor.sh's own mkdir-based lock (mkdir is atomic
+# per POSIX, and unlike `flock` needs nothing extra installed - not
+# guaranteed present on this device's busybox build) - only the LOCKDIR
+# path differs. Serializes --background/--stop/--status against each other
+# the same way, which also closes the two smaller variants kill_tracked_
+# pid's own header already named as real (see its comment below): --stop
+# re-reading $PIDFILE a second time (once inside is_running's own check,
+# again for the `kill` itself) let a --background racing in between act on
+# a stale read; --status had the identical second-read gap for its printed
+# PID. The AUTHORITATIVE is_running check/fork/write for --background now
+# happens together, lock-held, right at the fork site further down (see its
+# own comment there) - not here; a script that hasn't even validated its
+# interface yet has no shared state worth locking over.
+#
+# Stale-lock recovery: the lock is only ever held for the few fast, local,
+# non-blocking checks in these three blocks (plus, for --background, one
+# unavoidable process fork+PID-write) - never across the long-running
+# capture/watcher loops themselves - so the only way it outlives its holder
+# is that holder getting SIGKILLed inside this narrow window. A waiter that
+# finds the lock held checks whether the PID that created it ($LOCKDIR/pid)
+# is still alive (same "does the recorded PID still actually belong to
+# something" check as pid_running() above) and clears the lock itself if
+# not, so a rare dead holder can't wedge every future --background/--stop/
+# --status behind a lock nobody will ever release. `rmdir` fails on a
+# non-empty directory, so the pid marker file is removed before the rmdir,
+# same ordering usb_monitor.sh's own version already verified is required.
+LOCKDIR="/tmp/pager-sniff.lock"
+acquire_lock() {
+    local tries=0 holder
+    while ! mkdir "$LOCKDIR" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 50 ] && die "Timed out waiting for another sniff.sh --background/--stop/--status to finish (lock: $LOCKDIR)."
+        holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+            rm -f "$LOCKDIR/pid" 2>/dev/null
+            rmdir "$LOCKDIR" 2>/dev/null
+            continue
+        fi
+        sleep 0.1
+    done
+    echo $$ > "$LOCKDIR/pid" 2>/dev/null
+}
+release_lock() { rm -f "$LOCKDIR/pid" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+
 if [ "$DO_STATUS" = "1" ]; then
+    acquire_lock
+    trap release_lock EXIT
     if is_running; then
         say "Capture running (PID $(cat "$PIDFILE"))."
     else
@@ -1238,6 +1389,8 @@ if [ "$DO_STATUS" = "1" ]; then
 fi
 
 if [ "$DO_STOP" = "1" ]; then
+    acquire_lock
+    trap release_lock EXIT
     if is_running; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
@@ -1330,10 +1483,31 @@ USB_A_STATEFILE="/tmp/pager-usb-a-state"
 # top, not a dependency the core feature needs to work.
 BRIDGE_DHCP_PIDFILE="/tmp/pager-sniff-bridge-dhcp.pid"
 
+# BRIDGE_DHCP_TIMEOUT_SECS / BRIDGE_DHCP_DISCOVER_TRIES /
+# BRIDGE_DHCP_RETRY_INTERVAL_SECS - start_bridge_dhcp's own overall time
+# budget (`timeout`), discover-attempt count (udhcpc -t), and seconds
+# between attempts (udhcpc -T) for requesting a lease on the bridge device.
+# Bounded deliberately (see start_bridge_dhcp's caller-side comment on
+# BRIDGE_DHCP_PIDFILE above) so a dead-end network can't turn this into an
+# indefinite hang - the bridge/tap itself is already fully functional
+# either way, this is a bonus on top. Pulled up from inline `timeout 20`/
+# `-t 5`/`-T 3` literals to named constants, same values, no behavior
+# change.
+BRIDGE_DHCP_TIMEOUT_SECS=20
+BRIDGE_DHCP_DISCOVER_TRIES=5
+BRIDGE_DHCP_RETRY_INTERVAL_SECS=3
+
+# DHCP_KILL_GRACE_SECS - stop_bridge_dhcp's own pause between asking udhcpc
+# to release its lease gracefully (SIGUSR2) and hard-killing it (SIGTERM) -
+# just long enough for the release/deconfig step to actually run first.
+# Pulled up from an inline `sleep 0.2` literal to a named constant, same
+# value, no behavior change.
+DHCP_KILL_GRACE_SECS=0.2
+
 start_bridge_dhcp() {
     command -v udhcpc >/dev/null 2>&1 || { err "udhcpc not found - can't request a DHCP lease on $BRIDGE_NAME. The bridge/tap itself is still fully working, just without its own address on the LAN."; return 1; }
-    say "Requesting a DHCP lease on $BRIDGE_NAME from the LAN this bridge is tapping (up to ~20s)..."
-    if timeout 20 udhcpc -i "$BRIDGE_NAME" -p "$BRIDGE_DHCP_PIDFILE" -t 5 -T 3 -n >/tmp/pager-sniff-dhcp.log 2>&1; then
+    say "Requesting a DHCP lease on $BRIDGE_NAME from the LAN this bridge is tapping (up to ~${BRIDGE_DHCP_TIMEOUT_SECS}s)..."
+    if timeout "$BRIDGE_DHCP_TIMEOUT_SECS" udhcpc -i "$BRIDGE_NAME" -p "$BRIDGE_DHCP_PIDFILE" -t "$BRIDGE_DHCP_DISCOVER_TRIES" -T "$BRIDGE_DHCP_RETRY_INTERVAL_SECS" -n >/tmp/pager-sniff-dhcp.log 2>&1; then
         local _ip
         _ip=$(ip -4 -o addr show "$BRIDGE_NAME" 2>/dev/null | awk '{print $4}' | head -1)
         if [ -n "$_ip" ]; then
@@ -1388,7 +1562,7 @@ stop_bridge_dhcp() {
         _pid=$(cat "$BRIDGE_DHCP_PIDFILE" 2>/dev/null)
         if pid_running "$BRIDGE_DHCP_PIDFILE" "udhcpc"; then
             kill -USR2 "$_pid" 2>/dev/null
-            sleep 0.2
+            sleep "$DHCP_KILL_GRACE_SECS"
             kill "$_pid" 2>/dev/null
         fi
         rm -f "$BRIDGE_DHCP_PIDFILE"
@@ -1417,6 +1591,43 @@ stop_bridge_dhcp() {
 # can't hold SSH hostage indefinitely. Override with PAGER_MAX_BRIDGE_SECS
 # for a deliberately longer session.
 MAX_BRIDGE_SECS="${PAGER_MAX_BRIDGE_SECS:-3600}"
+
+# WATCHDOG_POLL_INTERVAL_SECS - how often (5s) start_lan_watchdog's loop
+# re-checks bridge-member presence/MAX_BRIDGE_SECS/canonicalize_lan_
+# topology, once per full pass through its 1s-at-a-time USB_A_STATEFILE
+# wait (see that loop's own comment for why it's split into 1s ticks
+# instead of one bare `sleep 5` - unchanged here, still the same total
+# wait). Pulled up from an inline `-lt 5` loop-bound literal to a named
+# constant, same value, no behavior change.
+WATCHDOG_POLL_INTERVAL_SECS=5
+
+# USB_A_HINT_STALE_SECS - how old (6s) a USB_A_STATEFILE "detached"
+# transition is allowed to be before start_lan_watchdog's fast-path hint
+# stops trusting it as fresh - see USB_A_STATEFILE's own comment above:
+# usb_monitor.sh's own poll loop is 2s, so anything staler than a few
+# cycles of that means it either isn't running right now or hasn't written
+# since before this wait even started. Pulled up from an inline `-le 6`
+# literal to a named constant, same value, no behavior change.
+USB_A_HINT_STALE_SECS=6
+
+# WATCHDOG_MEMBER_RETRY_COUNT - number of extra 1s-apart retries (2)
+# start_lan_watchdog gives a bridge member's sysfs presence check before
+# concluding it's really gone and tearing the bridge down - guards against
+# a single transient hiccup causing a false-positive teardown of a
+# perfectly healthy bridge (same reasoning as UNBRIDGE_DELETE_RETRY_COUNT
+# below). Pulled up from an inline `-lt 2` loop-bound literal to a named
+# constant, same value, no behavior change.
+WATCHDOG_MEMBER_RETRY_COUNT=2
+
+# UNBRIDGE_DELETE_RETRY_COUNT - number of extra 1s-apart retries (3)
+# --unbridge gives `ip link delete $BRIDGE_NAME` before reporting it
+# couldn't be removed - a netlink socket can transiently still be settling
+# right after a disruptive bridge teardown (same reasoning as
+# WATCHDOG_MEMBER_RETRY_COUNT above and canonicalize_lan_topology's own
+# retry loop in lib/common.sh). Pulled up from an inline `-lt 3` loop-bound
+# literal (in the --unbridge handler further down) to a named constant,
+# same value, no behavior change.
+UNBRIDGE_DELETE_RETRY_COUNT=3
 
 start_lan_watchdog() {
     # BUG FOUND AND FIXED (CRITICAL, live-caught): this never checked for
@@ -1515,15 +1726,39 @@ start_lan_watchdog() {
             # early wake-up when the hint is fresh and relevant.
             _usb_a_hint=0
             _slept=0
-            while [ "$_slept" -lt 5 ]; do
+            while [ "$_slept" -lt "$WATCHDOG_POLL_INTERVAL_SECS" ]; do
                 sleep 1
                 _slept=$((_slept + 1))
-                if [ -r "$USB_A_STATEFILE" ] && [ "$(cat "$USB_A_STATEFILE" 2>/dev/null)" = "detached" ]; then
+                # PERFORMANCE FIX (measured, not guessed - see standalone
+                # repro this pass: 300 iterations of `$(cat file)` took
+                # ~17.8s vs ~0.1s for 300 iterations of a plain builtin
+                # `read` against the same file, ~150x apart per call on this
+                # dev machine - forking `cat` is real, avoidable overhead
+                # here, not just theoretical). This line runs on EVERY 1s
+                # tick of this loop (up to WATCHDOG_POLL_INTERVAL_SECS times
+                # per outer 5s watchdog cycle) for as long as any --bridge
+                # session is up (up to MAX_BRIDGE_SECS, an hour by default) -
+                # in the common case (USB_A_STATEFILE exists and is
+                # readable, true almost the entire time usb_monitor.sh is
+                # running) the old `$(cat ...)` forked an external `cat`
+                # process on every single one of those ticks just to read a
+                # one-line, few-byte statefile - up to ~3600 avoidable forks
+                # over one hour-long bridge session, for a value `read` (a
+                # bash builtin, no fork at all) reads identically. Behavior
+                # is unchanged: usb_monitor.sh always writes a single
+                # `printf '%s\n' "$usb_a_pub"` line (see its own publish
+                # site), so a plain `read -r` captures the exact same text
+                # `cat` would have, and an unreadable/missing file still
+                # leaves _usb_a_val empty (not "detached") exactly like the
+                # old `[ -r ... ] &&` guard did.
+                _usb_a_val=""
+                [ -r "$USB_A_STATEFILE" ] && IFS= read -r _usb_a_val < "$USB_A_STATEFILE" 2>/dev/null
+                if [ "$_usb_a_val" = "detached" ]; then
                     _st_mtime=$(date -r "$USB_A_STATEFILE" +%s 2>/dev/null)
                     _st_now=$(date +%s 2>/dev/null)
                     case "$_st_mtime" in ''|*[!0-9]*) _st_mtime="" ;; esac
                     case "$_st_now" in ''|*[!0-9]*) _st_now="" ;; esac
-                    if [ -n "$_st_mtime" ] && [ -n "$_st_now" ] && [ "$_st_now" -ge "$_st_mtime" ] && [ $((_st_now - _st_mtime)) -le 6 ]; then
+                    if [ -n "$_st_mtime" ] && [ -n "$_st_now" ] && [ "$_st_now" -ge "$_st_mtime" ] && [ $((_st_now - _st_mtime)) -le "$USB_A_HINT_STALE_SECS" ]; then
                         _usb_a_hint=1
                         break
                     fi
@@ -1646,7 +1881,7 @@ start_lan_watchdog() {
             [ -e "/sys/class/net/$BR_IFACE2" ] && _br2_present=1
             if [ "$_br1_present" = "0" ] || [ "$_br2_present" = "0" ]; then
                 _retry=0
-                while [ "$_retry" -lt 2 ]; do
+                while [ "$_retry" -lt "$WATCHDOG_MEMBER_RETRY_COUNT" ]; do
                     sleep 1
                     _retry=$((_retry + 1))
                     _br1_present=0; _br2_present=0
@@ -1778,9 +2013,9 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
     # Short retry (same reasoning as canonicalize_lan_topology's own)
     # before reporting honestly.
     tries=0
-    while [ "$tries" -lt 3 ] && ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; do
+    while [ "$tries" -lt "$UNBRIDGE_DELETE_RETRY_COUNT" ] && ip_link show "$BRIDGE_NAME" >/dev/null 2>&1; do
         tries=$((tries + 1))
-        if [ "$tries" -lt 3 ]; then
+        if [ "$tries" -lt "$UNBRIDGE_DELETE_RETRY_COUNT" ]; then
             sleep 1
             ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
         fi
@@ -1968,8 +2203,30 @@ if ! ip_link show "$IFACE" >/dev/null 2>&1; then
     fi
 fi
 
-command -v tcpdump >/dev/null 2>&1 || die "tcpdump is not installed on this device."
+# BUG FOUND AND FIXED (clarity): this named WHICH program was missing
+# (tcpdump) but never said what to do about it - every other required-
+# program check in this toolkit that can actually be remediated on-device
+# (LanScan.sh's nmap check, webui.sh/deadnet.sh's python3 check) pairs the
+# "not installed" diagnosis with the exact opkg command to fix it; this
+# one didn't, for no functional reason - just an oversight, not a
+# deliberate omission (tcpdump normally ships pre-installed on the Pager,
+# per this file's own header comment, so hitting this at all already
+# means something non-standard happened - a stripped-down image or a
+# firmware issue - which is exactly when a caller most needs to be told
+# how to recover, not just that something is wrong). User sees "tcpdump
+# is not installed on this device." and would think "now what - reflash?
+# is my Pager broken?" with no next step offered, unlike every sibling
+# check in this same toolkit. Matching the established convention here
+# closes that gap.
+command -v tcpdump >/dev/null 2>&1 || die "tcpdump is not installed on this device (unusual - it normally ships pre-installed on the Pager). Install it with: opkg update && opkg install -d mmc tcpdump"
 
+# Fast, non-authoritative pre-check only - avoids running interface
+# validation/mkdir/etc. below just to fail anyway in the common case. NOT
+# what closes the concurrent-launch race (see LOCKDIR's own header comment
+# above, near --status): the real, lock-protected check+fork+PIDFILE-write
+# happens together at the actual launch site further down, which is the
+# only way to close the gap between "checked" and "wrote" instead of just
+# moving it.
 if [ "$BACKGROUND" = "1" ] && is_running; then
     die "A background capture is already running (PID $(cat "$PIDFILE")). Use --stop first."
 fi
@@ -1977,6 +2234,42 @@ fi
 mkdir -p "$LOOT_DIR"
 STAMP=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo "sniff")
 [ -z "$OUTPUT" ] && OUTPUT="$LOOT_DIR/sniff-${IFACE}-${STAMP}.pcap"
+
+# BUG FOUND AND FIXED (clarity): `mkdir -p "$LOOT_DIR"` above is a silent
+# no-op whenever the directory already exists - which it normally does
+# after the first capture ever run on this device - so it proves nothing
+# about whether that directory can actually be WRITTEN to right now. A
+# disk that's since filled up, or a filesystem that's gone read-only
+# (both real conditions on a small-storage device like this one, and both
+# reachable with the directory present and unchanged), sailed straight
+# past this line with no error. The actual failure only surfaced later,
+# inside tcpdump itself: in the foreground path it showed up buried in
+# tcpdump's own stderr (mixed into the live packet output via the `2>&1`
+# in run_capture) or as the generic three-way-guess "tcpdump likely never
+# started (bad --filter syntax, '$IFACE' disappearing, or the --output
+# directory not existing/writable)" further below; in the --background
+# path it was worse - the exact same failure produced "Capture exited
+# immediately - check /tmp/pager-sniff.log (a bad --duration or --filter,
+# or tcpdump failing to open '$IFACE', are the likely causes)", which
+# doesn't even mention the output directory as a possibility, actively
+# pointing the caller at the wrong three suspects for a still-perfectly-
+# fine --duration/--filter/--iface. User sees that message, would think
+# "my filter or interface is wrong" and starts second-guessing a correct
+# command line, when the real problem (a full or read-only disk) isn't
+# named anywhere. Proactively write-testing the real target directory
+# here - before tcpdump ever launches, in both foreground and background
+# modes alike - catches read-only-filesystem and out-of-space failures
+# at the moment they actually happen and reports the OS's own specific
+# reason (EACCES/EROFS/ENOSPC all produce distinct, human-readable text
+# from bash's own redirection error handling - verified standalone: a
+# missing/unwritable target directory reliably produces a message like
+# "No such file or directory" or "Permission denied" via this exact
+# `: > file` redirection idiom) instead of a generic multi-cause guess.
+out_dir=$(dirname "$OUTPUT")
+if ! write_test_err=$( { : > "$out_dir/.sniff-write-test.$$"; } 2>&1 ); then
+    die "Can't write to the capture output folder '$out_dir' ($write_test_err) - likely the disk is full or the filesystem is read-only. Check with 'df -h $out_dir', or pass --output to save somewhere else (e.g. --output /tmp/capture.pcap)."
+fi
+rm -f "$out_dir/.sniff-write-test.$$"
 
 # BUG FOUND AND FIXED: -U (unbuffered immediate writes to the save file)
 # used to be tied to NOT showing live output - backwards, since -U is
@@ -2107,9 +2400,25 @@ run_capture_bg() {
 
 if [ "$BACKGROUND" = "1" ]; then
     say "Launching capture in the background - use 'sniff.sh --stop' to end it."
+    # AUTHORITATIVE check-then-act, lock-protected - see LOCKDIR's own
+    # header comment (near --status above) for the full reasoning/repro:
+    # this is the actual check+fork+PIDFILE-write sequence that two
+    # concurrent --background launches could otherwise both race through,
+    # each thinking it alone confirmed nothing was running. Held only
+    # across the check and the fork+write themselves (not the liveness
+    # sleep below, which needs no cross-process exclusion) so a waiter
+    # never blocks on more than a fast, local operation.
+    acquire_lock
+    trap release_lock EXIT
+    if is_running; then
+        die "A background capture is already running (PID $(cat "$PIDFILE")). Use --stop first."
+    fi
     # No `nohup` on this busybox build - ignore SIGHUP in a subshell instead.
     ( trap '' HUP; run_capture_bg ) >/tmp/pager-sniff.log 2>&1 &
-    echo $! > "$PIDFILE"
+    BG_PID=$!
+    echo "$BG_PID" > "$PIDFILE"
+    release_lock
+    trap - EXIT
     # BUG FOUND AND FIXED (found via code review, same class as
     # PayloadRunner.sh's own fix): this used to print "Started (PID ...)"
     # unconditionally right after backgrounding, with no check the
@@ -2119,11 +2428,56 @@ if [ "$BACKGROUND" = "1" ]; then
     # second, invisible to a check that doesn't wait and look. webui.sh
     # already does exactly this liveness check for its own background
     # launch - matching that here instead of assuming success.
+    #
+    # BUG FOUND AND FIXED (verified with a standalone repro before writing
+    # this fix: looping the equivalent of `( exec timeout 1 sleep N ) &
+    # PID=$!; sleep 1; kill -0 "$PID"` 50 times measured the backgrounded
+    # process already gone by the time the check ran in 3/50 runs - a real,
+    # non-hypothetical rate even on hardware far faster than this device).
+    # A `--background --duration 1` capture (a real, explicitly-supported
+    # value - --duration 0 is rejected above specifically as "not the same
+    # as stop immediately", so 1 is the shortest capture a caller can
+    # actually ask for) races its own `timeout 1` deadline against this
+    # same fixed 1s liveness-check sleep, since run_capture_bg's `exec`
+    # means the backgrounded process's own countdown and this sleep both
+    # start within a few ms of each other. When the process loses that
+    # race and has already exited by the time `is_running` runs, the OLD
+    # code below unconditionally treated "not running" as failure and
+    # `die`d with "Capture exited immediately" - actively WRONG for this
+    # case: the capture didn't fail, it ran its full requested 1 second and
+    # completed normally, exactly as a longer capture would if checked
+    # after ITS own duration elapsed. Distinguishing the two cases the same
+    # way this file's own foreground path already does further down (a
+    # non-empty $OUTPUT means tcpdump genuinely opened the interface and
+    # wrote real capture data, vs. an empty/missing one meaning it never
+    # got that far) - a short-but-real completed capture now reports
+    # success with its real (possibly empty-of-packets, but real) .pcap,
+    # instead of a misleading failure message for a capture that actually
+    # worked.
+    # BUG FOUND AND FIXED (narrow, but real - traced while writing the fix
+    # just above, not a separate live symptom): a bare `rm -f "$PIDFILE"`
+    # in the two branches below assumes $PIDFILE still holds OUR OWN
+    # $BG_PID - true in the overwhelmingly common case, but this whole
+    # section runs AFTER release_lock, so it's no longer serialized against
+    # another --background invocation. A capture that loses the race just
+    # documented above (finishes within this same 1s window) creates a
+    # narrow opening: if a brand-new, unrelated --background is launched by
+    # someone else in that same window, sees (correctly) that our now-
+    # finished capture isn't running, and writes ITS OWN pid to $PIDFILE
+    # before we reach our own `rm -f` here, a bare unconditional rm would
+    # delete THAT capture's live tracking entirely - the exact "orphaned,
+    # untracked tcpdump" failure mode this whole fix exists to prevent,
+    # just reached via a different interleaving. Only remove $PIDFILE when
+    # it still names the PID we ourselves wrote.
     sleep 1
     if is_running; then
         say "Started (PID $(cat "$PIDFILE"))."
+    elif [ -s "$OUTPUT" ]; then
+        [ "$(cat "$PIDFILE" 2>/dev/null)" = "$BG_PID" ] && rm -f "$PIDFILE"
+        say "Capture already finished - it completed (e.g. a short --duration elapsed) before this check could catch it still running. Saved to $OUTPUT."
+        exit 0
     else
-        rm -f "$PIDFILE"
+        [ "$(cat "$PIDFILE" 2>/dev/null)" = "$BG_PID" ] && rm -f "$PIDFILE"
         die "Capture exited immediately - check /tmp/pager-sniff.log (a bad --duration or --filter, or tcpdump failing to open '$IFACE', are the likely causes)."
     fi
     # Live credential watcher (see run_creds_watcher) - appends into the

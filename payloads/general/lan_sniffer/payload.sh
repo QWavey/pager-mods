@@ -55,16 +55,21 @@
 # view's routine, LOG-batched traffic feed - meaning it could be buried
 # among dozens of ordinary lines, or even silently dropped by that
 # scroller's own 40-line-per-poll-tick truncation during a genuinely busy
-# capture. It now also fires a dedicated ALERT (scanning the untruncated
-# new lines each tick, so a hit can never be truncated away first) - the
-# same unmissable signal Hak5 reserves for its own rare/important events.
-# In the other direction, three ALERTs that fired on the routine, expected,
-# 100%-of-the-time path (adapter status after the operator explicitly asked
-# to check it; capture-complete after both capture flows, immediately
-# following three direct operator interactions in a row on that exact
-# screen) were switched to a plain LOG completion marker - they added
-# nothing the operator didn't already know, and diluted ALERT's signal
-# value everywhere else it's used, including the new creds ALERT above.
+# capture. It now fires as its own dedicated, always-shown LOG line up
+# front (scanning the untruncated new lines each tick, so a hit can never
+# be truncated away first) instead of only ever being buried inside the
+# routine feed. (An ALERT was tried here first for maximum visibility, but
+# had to be reverted - it competes with this same live view's own
+# WAIT_FOR_INPUT for "waiting on a button" and can render out of order via
+# the platform's own queuing; see the BUG FOUND AND FIXED comment on that
+# revert, further down where the creds scan itself lives, for the full
+# story.) In the other direction, three ALERTs that fired on the routine,
+# expected, 100%-of-the-time path (adapter status after the operator
+# explicitly asked to check it; capture-complete after both capture flows,
+# immediately following three direct operator interactions in a row on
+# that exact screen) were switched to a plain LOG completion marker - they
+# added nothing the operator didn't already know, and diluted ALERT's
+# signal value everywhere else it's used.
 #
 # Button behavior: A pauses/resumes the live view (pausing stops new
 # lines from arriving so you can scroll back through what's already on
@@ -223,9 +228,18 @@ maybe_save_log() {
             echo
             echo "$summary"
         } > "$dest" 2>/dev/null
-        LOG "Saved to $dest"
+        # CONSISTENCY FIX: these two lines are this payload's own
+        # single-purpose narration about an action IT just took (same
+        # category as "Bridge is up...", "-- Capture complete --", the
+        # adapter-status lines, etc. - all routed through plog() elsewhere
+        # in this file) - not a raw relay of sniff.sh/tcpdump output or the
+        # scroller's own multi-line chunk feed, the two cases plog()'s own
+        # header comment carves out as deliberately untagged. These two
+        # calls were left on bare LOG (no "[LAN Sniffer] " tag) when plog()
+        # was introduced, unlike every other narration line in this file.
+        plog "Saved to $dest"
     else
-        LOG "Not saved."
+        plog "Not saved."
     fi
 }
 
@@ -248,20 +262,56 @@ maybe_save_log() {
 # can never block waiting for more input the way `-f` does, so even a
 # worst-case kill mid-read leaves nothing that lingers).
 SCROLLER_PID=""
+# BUG FOUND AND FIXED (CRITICAL, cross-fix interaction - fresh-eyes review,
+# verified with a standalone repro): start_scroll()'s poller used to
+# initialize `__last=0` fresh EVERY time it (re)started. That's correct for
+# the very first start, but this same function is also what A's resume path
+# calls (stop_scroll() kills the poller subshell outright, resume calls
+# start_scroll() again, which forks a BRAND NEW subshell with its own fresh
+# `local __last=0` - the whole point of the orphan-safety fix above is that
+# each start/stop is a totally new process). The underlying sniff.sh capture
+# is never actually paused by A - only this on-screen poller is - so
+# /tmp/pager-sniff.log keeps growing the entire time the operator is
+# paused. Resuming with a fresh `__last=0` then treats the WHOLE file,
+# including everything already shown before the pause, as "new" again.
+# Confirmed standalone: write 5 lines, start the poller, stop it, write 3
+# more lines, start it again - the resumed poller re-displayed all 5
+# original lines alongside the 3 genuinely new ones. Worse than just
+# repetitive: it re-feeds already-seen text through the creds-hit scan
+# below too, so a credential already flagged before a pause fires its
+# "!! CREDENTIAL(S) CAPTURED !!" line again on every single resume for the
+# rest of the session - exactly the kind of noise tonight's batching/dedup
+# work elsewhere in this function was trying to eliminate. Fixed by
+# persisting the last-seen line count to a small state file instead of a
+# subshell-local variable (which cannot survive the subshell being killed
+# and re-forked) - start_scroll() reads it back in on every (re)start, so a
+# resume only ever catches up on what actually arrived during the pause.
+# Reset once per session, right before the FIRST start_scroll() call (see
+# run_live_capture() below) - a genuinely new capture still starts from 0,
+# only the pause/resume replay is fixed.
+SCROLLER_LAST_FILE="/tmp/pager-sniff-scroll-last"
 start_scroll() {
     (
-        local __last=0 __total __new_count __new_lines __chunk __creds_hit
+        local __last __new_lines __new_count __chunk __creds_hit
+        __last=$(cat "$SCROLLER_LAST_FILE" 2>/dev/null); __last=${__last:-0}
         while :; do
-            __total=$(wc -l < /tmp/pager-sniff.log 2>/dev/null || echo 0)
-            if [ "$__total" -gt "$__last" ] 2>/dev/null; then
-                __new_count=$((__total - __last))
-                # Read the new lines ONCE per tick (used below both for the
-                # creds scan and, possibly truncated, for the LOG chunk) -
-                # also incidentally removes a prior double-read-of-the-file
-                # (the truncated and untruncated branches used to each tail
-                # the file separately, so a fast-growing file could in
-                # theory make them disagree on what "new" meant).
-                __new_lines=$(tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null)
+            # BUG FOUND AND FIXED (race, low severity - verified with a
+            # standalone repro): this used to take a `wc -l` snapshot of
+            # the total line count, THEN separately read the new lines
+            # via `tail`. If a concurrent writer (the packet feed or
+            # creds watcher) appended between those two calls, `tail`
+            # picked up the extra line(s) but `__last` was then set from
+            # the OLDER, smaller `wc -l` snapshot - so the same line(s)
+            # got re-read and re-displayed (and re-scanned for creds) on
+            # the NEXT tick too. Deriving both the new-lines read AND the
+            # updated `__last` from this SAME `tail` call (below) removes
+            # the gap between the two reads entirely - nothing left for a
+            # concurrent write to land in between. Also reads the new
+            # lines ONCE per tick either way (used below both for the
+            # creds scan and, possibly truncated, for the LOG chunk).
+            __new_lines=$(tail -n "+$((__last + 1))" /tmp/pager-sniff.log 2>/dev/null)
+            if [ -n "$__new_lines" ]; then
+                __new_count=$(printf '%s\n' "$__new_lines" | wc -l)
                 # BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): the
                 # previous version of this fired ALERT here for a live
                 # [CREDS FOUND] hit. README.md's own postmortem on the
@@ -334,25 +384,29 @@ $(echo "$__new_lines" | tail -n 40)"
                     __chunk="$__new_lines"
                 fi
                 LOG "$__chunk"
-                __last="$__total"
+                __last=$((__last + __new_count))
+                echo "$__last" > "$SCROLLER_LAST_FILE" 2>/dev/null
             fi
             # PERFORMANCE FIX (measured, not just "feels faster"): this
             # polled /tmp/pager-sniff.log every 1s for the ENTIRE live-view
             # session (which can run for the full duration of an Infinite-
-            # mode capture, potentially hours) - a `wc -l` subprocess spawn
-            # every single second regardless of whether anything new had
-            # actually arrived. The fastest thing that ever writes NEW
-            # lines into that log is sniff.sh's own run_packet_feed, on a
-            # fixed 2s cadence (see its own header comment there - the
-            # creds watcher is slower still, at 5s) - nothing in this
-            # toolkit can ever produce a fresh line faster than 2s apart,
-            # so a 1s poll here was, on average, finding "nothing new" on
-            # every other tick and paying a full subprocess spawn for that
-            # empty check anyway. Slowing this to 2s - matching the fastest
-            # real producer exactly - halves the `wc -l` spawn count for
-            # the life of the session with no loss of responsiveness: a
-            # burst can still only ever show up at most 2s after it was
-            # written, identical to today, since nothing arrives sooner.
+            # mode capture, potentially hours) - a subprocess spawn (this
+            # tick's file read, `wc -l` at the time this comment was
+            # written, `tail` now that the race fix above folded the total-
+            # count read and the new-lines read into one call) every single
+            # second regardless of whether anything new had actually
+            # arrived. The fastest thing that ever writes NEW lines into
+            # that log is sniff.sh's own run_packet_feed, on a fixed 2s
+            # cadence (see its own header comment there - the creds watcher
+            # is slower still, at 5s) - nothing in this toolkit can ever
+            # produce a fresh line faster than 2s apart, so a 1s poll here
+            # was, on average, finding "nothing new" on every other tick and
+            # paying a full subprocess spawn for that empty check anyway.
+            # Slowing this to 2s - matching the fastest real producer
+            # exactly - halves that spawn count for the life of the session
+            # with no loss of responsiveness: a burst can still only ever
+            # show up at most 2s after it was written, identical to today,
+            # since nothing arrives sooner.
             # Button responsiveness (A/B) is unaffected either way - that's
             # WAIT_FOR_INPUT blocking in the separate main loop below, not
             # gated by this poller's interval at all.
@@ -430,6 +484,11 @@ run_live_capture() {
     else
         plog "Live capture on $iface (until stopped) - A: pause/resume view, B: stop."
     fi
+    # Reset the persisted scroll position for this NEW session (see the
+    # BUG FOUND AND FIXED comment on SCROLLER_LAST_FILE above) - a leftover
+    # value from a previous run_live_capture() call must never leak in here
+    # and make this fresh capture's own early lines look already-seen.
+    rm -f "$SCROLLER_LAST_FILE"
     start_scroll
     local paused=0 __btn
     while true; do

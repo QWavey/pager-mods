@@ -457,7 +457,18 @@ run_monitor() {
         if [ -n "$a_if" ] && iface_has_carrier "$a_if"; then
             a_state="attached"
         elif [ -n "$a_if" ]; then
-            a_state="detected-link-down"
+            # CONSISTENCY FIX: this used to be the raw internal token
+            # "detected-link-down" (a compact string chosen only for the
+            # `!=` state-change comparisons below), printed to the operator
+            # verbatim via notify() - a literal, hyphenated state-machine
+            # name, not a written sentence. sniff.sh's check_adapters() and
+            # lan_sniffer/payload.sh's own "Check adapter status" case both
+            # describe this exact same condition (adapter present, no
+            # carrier) as "detected but link down" - matching that wording
+            # here too, since $a_state is compared only by quoted string
+            # equality (never pattern-matched), a value containing spaces
+            # works identically for that purpose.
+            a_state="detected but link down"
         else
             a_state="none"
         fi
