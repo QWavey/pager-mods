@@ -274,6 +274,26 @@ else
     /root/scripts/deauth.sh --bssid "$__bssid" --target "$__target" --channel "$__channel" --background -y
 fi
 
+# BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): once launched with
+# --background, deauth.sh runs "continuously... until you press B" - the
+# ONLY code path that ever stopped it was the explicit `deauth.sh --stop`
+# below, reached after WAIT_FOR_BUTTON_PRESS B returns. If this payload's
+# own process is killed or exits abnormally (the platform force-quitting
+# it, a crash, anything short of SIGKILL/power-loss) while blocked in
+# WAIT_FOR_BUTTON_PRESS, that stop call never runs - the deauth attack
+# keeps running indefinitely, invisibly, with no UI left to stop it from.
+# Same orphaned-background-process class already confirmed live tonight
+# for a bridge watchdog, but worse here: an ongoing wireless attack that
+# outlives the payload that was supposed to be the only thing controlling
+# it, against a device "IMPORTANT: only run this against networks/clients
+# you are authorized to test" explicitly relies on being stoppable. Fixed
+# with an EXIT trap that stops it regardless of how this script exits
+# from here on (bounded by an outer timeout as a backstop, same reasoning
+# used elsewhere in this toolkit for trap commands that must never be
+# able to hang themselves); calling --stop again on the normal exit path
+# below is a harmless no-op once this has already run.
+trap 'timeout 15 /root/scripts/deauth.sh --stop >/dev/null 2>&1' EXIT
+
 # BUG FOUND AND FIXED (reported live): this used to show "Deauth running -
 # press B to stop" unconditionally right after launching --background,
 # with no check that the attack actually started. deauth.sh returning
@@ -288,7 +308,24 @@ if ! /root/scripts/deauth.sh --status 2>&1 | grep -qi running; then
     exit 1
 fi
 
-ALERT "Deauth running - press B to stop"
+# BUG FOUND AND FIXED (same reordering class already confirmed live and
+# fixed this session in the LAN Sniffer payload: an ALERT immediately
+# ahead of the very next blocking platform call, with essentially no real
+# work between them, reportedly gets QUEUED and rendered only after that
+# next call's own interaction finishes - not fixed by any delay inserted
+# between the two, since the ALERT was already queued before the delay
+# even started). This ALERT sat directly before WAIT_FOR_BUTTON_PRESS B
+# on the very next line - the identical shape. If it renders late, "Deauth
+# running - press B to stop" could pop up only AFTER B has already been
+# pressed and the attack already stopped (right as "Deauth stopped" is
+# also trying to show), which is actively misleading rather than just
+# cosmetically delayed. Not independently reproduced live here (no access
+# to the physical device this session - static analysis only), but this
+# is the same call shape as the confirmed bug, so treated as a real
+# instance of it: converted to LOG, which - same as the LAN Sniffer fix -
+# never needs dismissing and so can never render out of order in a way
+# that matters.
+LOG "Deauth running - press B to stop."
 WAIT_FOR_BUTTON_PRESS B
 
 /root/scripts/deauth.sh --stop

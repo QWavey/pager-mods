@@ -607,9 +607,27 @@ run_creds_watcher() {
         # after each call, before any further piping, and saying so
         # plainly when it happens.
         local tcpdump_rc=$?
-        if [ -s "$dumpf" ] && [ "$tcpdump_rc" -eq 124 ]; then
+        # BUG FOUND AND FIXED (MINOR, gap in the fix directly above - the
+        # `[ -s "$dumpf" ] &&` on the notice meant a cycle that got killed
+        # at the 15s deadline SO early that tcpdump/its OS-buffered stdout
+        # had not flushed a single byte yet (tcpdump's stdout is fully
+        # block-buffered here - no -l on this internal re-scan invocation,
+        # unlike the main capture's own TD_ARGS - so a kill before its
+        # buffer fills or it exits can lose everything it had already
+        # decoded) fell straight through to the `elif [ ! -s "$dumpf" ]`
+        # branch and got silently discarded with NO cutoff notice at all -
+        # the exact "silently under-reporting is worse than being slow"
+        # failure the fix above says it's trying to avoid, just for the
+        # specific case of a cutoff that happened to produce zero bytes
+        # instead of some. Checking tcpdump_rc==124 on its own, unconditional
+        # on whether dumpf ended up with any content, prints the notice
+        # every time a cutoff genuinely happened - then the emptiness check
+        # right after decides only whether there's anything left to scan
+        # this cycle, independently.
+        if [ "$tcpdump_rc" -eq 124 ]; then
             echo "[sniff.sh] NOTE: this cycle's re-scan was cut off after 15s (busy capture) - results below may be incomplete for this cycle; a full, complete pass still happens at the end via --summary."
-        elif [ ! -s "$dumpf" ]; then
+        fi
+        if [ ! -s "$dumpf" ]; then
             rm -f "$dumpf"
             continue
         fi
@@ -731,14 +749,25 @@ run_packet_feed() {
 
         local lines count new lines_rc
         lines=$(timeout 10 tcpdump -nn -r "$file" 2>/dev/null); lines_rc=$?
-        [ -z "$lines" ] && continue
         # BUG FOUND AND FIXED (same class as run_creds_watcher's own fix,
         # applied here too): timeout's exit code is captured immediately
         # after the direct (non-piped) command substitution above, so 124
         # specifically means "cut off at 10s, this cycle's feed may be
         # incomplete" rather than silently treating a truncated decode as
         # a complete one.
+        #
+        # BUG FOUND AND FIXED (MINOR, same reordering gap as run_creds_
+        # watcher's sibling fix): this notice used to be checked AFTER the
+        # `[ -z "$lines" ] && continue` line above it - a cutoff so early
+        # that tcpdump's own (block-buffered, no -l on this internal re-scan
+        # invocation) stdout had flushed nothing yet meant `lines` was empty
+        # and the `continue` fired first, skipping this notice entirely for
+        # exactly the cutoffs most likely to actually lose data. Checking
+        # lines_rc before the emptiness check (which now runs right after,
+        # unconditionally) means the notice fires every time a cutoff really
+        # happened, independent of how much (if anything) was salvaged.
         [ "$lines_rc" -eq 124 ] && echo "-- (this cycle's feed was cut off after 10s, busy capture) --"
+        [ -z "$lines" ] && continue
         count=$(echo "$lines" | grep -c .)
         if [ "$count" -gt "$last_count" ]; then
             new=$(echo "$lines" | tail -n "+$((last_count + 1))")
@@ -843,15 +872,24 @@ if [ "$DO_STOP" = "1" ]; then
     # real PID and kill it directly, don't trust a self-check condition
     # to reliably notice from the inside. See the matching PID capture in
     # the --background launch block below.
+    #
+    # BUG FOUND AND FIXED (MINOR, same PID-reuse class as the WATCHDOG_
+    # PIDFILE fixes above - these two track run_creds_watcher/run_packet_
+    # feed's own subshell PIDs, which are the same kind of non-exec'd bash
+    # subshell of this script, so the same "$(cat pidfile)" blind kill had
+    # the same theoretical gap. Lower severity than the watchdog case (these
+    # subshells are far shorter-lived - minutes at most, not up to an hour -
+    # so the PID-reuse window is narrower still), but the fix is free, so
+    # applied for the same safety guarantee everywhere this pattern appears.
     if [ -f "${PIDFILE}.watcher" ]; then
-        kill "$(cat "${PIDFILE}.watcher")" 2>/dev/null
+        pid_running "${PIDFILE}.watcher" "sniff.sh" && kill "$(cat "${PIDFILE}.watcher")" 2>/dev/null
         rm -f "${PIDFILE}.watcher"
     fi
     # Same PID-tracking fix, same reason, for run_packet_feed (the
     # separate 2s "live spammy view" cadence added alongside the
     # credential/HTTP watcher above).
     if [ -f "${PIDFILE}.feed" ]; then
-        kill "$(cat "${PIDFILE}.feed")" 2>/dev/null
+        pid_running "${PIDFILE}.feed" "sniff.sh" && kill "$(cat "${PIDFILE}.feed")" 2>/dev/null
         rm -f "${PIDFILE}.feed"
     fi
     # Defense-in-depth: both watchers' periodic `tcpdump -r FILE`
@@ -996,8 +1034,32 @@ start_lan_watchdog() {
     # that window, independent of whatever bridge/test was active at the
     # time. Kill and clear any existing watchdog first, every time, so at
     # most one can ever be alive.
+    #
+    # BUG FOUND AND FIXED (MAJOR, PID-reuse risk in this exact "kill first"
+    # fix as originally written): a bare `kill "$(cat "$WATCHDOG_PIDFILE")"`
+    # trusts the pidfile's number completely - it never confirms the PID it's
+    # about to kill is actually still the watchdog subshell that wrote it.
+    # If that subshell died some other way (crash, an out-of-band `kill -9`,
+    # anything that skips this file's own cleanup) and this device's PID
+    # counter later reused that exact number for a totally unrelated process
+    # (sshd, a cron job, anything else) before the next --bridge ran, this
+    # would kill that unrelated process instead - the identical PID-reuse
+    # class of bug pid_running() in lib/common.sh was already hardened
+    # against (see its own header) for is_running()'s "tcpdump" check, just
+    # never carried over to this brand-new call site. Routed through
+    # pid_running() with the "sniff.sh" NAME_PATTERN instead - the watchdog
+    # is a plain (non-exec'd) bash subshell of this same script, so its real
+    # /proc/PID/cmdline still contains "sniff.sh" the same way it does for
+    # every other subshell-style background process this file tracks (see
+    # pid_running()'s own comment for the full list). This also directly
+    # covers the "stale/garbage/missing pidfile" cases asked about: a
+    # missing file is already handled by the `[ -f ... ]` guard; a
+    # nonexistent PID or one that plainly isn't ours now makes pid_running()
+    # return false, so the kill is skipped entirely and only the stale
+    # pidfile itself is cleaned up - never a blind kill of whatever that
+    # number currently happens to point at.
     if [ -f "$WATCHDOG_PIDFILE" ]; then
-        kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
+        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
         rm -f "$WATCHDOG_PIDFILE"
     fi
     local _start_ts
@@ -1052,6 +1114,68 @@ start_lan_watchdog() {
                     exit 0
                 fi
             fi
+            # BUG FOUND AND FIXED (CRITICAL, freshly discovered this pass -
+            # matches a real, confirmed-live trigger: usb_monitor.sh
+            # independently detected and printed "USB-A (eth1): detached"
+            # on-screen DURING an active LAN Sniffer bridge/capture session
+            # tonight). canonicalize_lan_topology's own "bridged" branch
+            # (lib/common.sh) only checks whether $BRIDGE_NAME (br-sniff)
+            # ITSELF still exists via `ip_link show` - it has no idea
+            # whether the interfaces actually bridged into it are still
+            # there. A USB-A adapter being physically UNPLUGGED does not
+            # remove br-sniff - the bridge device survives with one fewer
+            # port. This is NOT the same as a cable-pull on a fixed NIC
+            # (carrier goes to 0, the interface itself stays in
+            # /sys/class/net) - an actual USB device removal triggers the
+            # kernel driver's disconnect() and unregisters the netdev
+            # entirely, so BR_IFACE2 (eth1) vanishes outright. Because
+            # `ip_link show "$BRIDGE_NAME"` keeps succeeding regardless, the
+            # reconciler's "bridge present - presumably holding eth0, not
+            # this reconciler's job to touch it" fast path fires every
+            # single 5s tick from that point on forever - eth0 is NEVER
+            # restored to br-lan no matter how long the bridge sits broken
+            # with a missing far-end leg. If --dhcp was in use, its lease
+            # was obtained VIA that now-vanished upstream link and is dead
+            # too - leaving BOTH the br-lan management path (eth0 still
+            # enslaved to a now half-useless br-sniff) AND the --dhcp path
+            # unreachable, with nothing left to notice short of a human
+            # watching, or MAX_BRIDGE_SECS (an hour by default) finally
+            # elapsing. Checking that BOTH configured bridge members are
+            # still present - not just the bridge device itself - before
+            # trusting the "bridge is healthy" fast path closes this: a
+            # genuinely vanished member now drives the exact same immediate
+            # teardown-and-restore path the MAX_BRIDGE_SECS branch above
+            # already uses, instead of waiting up to an hour or forever. A
+            # short retry (same 1s-delay/multi-try shape already used
+            # everywhere else in this file, e.g. canonicalize_lan_topology's
+            # own 3-try loop and --bridge's own existence-check retry)
+            # avoids a false-positive teardown from nothing worse than a
+            # single transient `ip link` hiccup.
+            _member_missing=0
+            if ! ip_link show "$BR_IFACE1" >/dev/null 2>&1 || ! ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
+                _retry=0
+                while [ "$_retry" -lt 2 ]; do
+                    sleep 1
+                    _retry=$((_retry + 1))
+                    if ip_link show "$BR_IFACE1" >/dev/null 2>&1 && ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
+                        break
+                    fi
+                done
+                if ! ip_link show "$BR_IFACE1" >/dev/null 2>&1 || ! ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
+                    _member_missing=1
+                fi
+            fi
+            if [ "$_member_missing" = "1" ]; then
+                ip_link set eth0 master br-lan 2>/dev/null
+                ip_link set eth0 up 2>/dev/null
+                stop_bridge_dhcp
+                ip_link set "$BRIDGE_NAME" down 2>/dev/null
+                ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
+                topology_log "watchdog: a bridge member ($BR_IFACE1/$BR_IFACE2) has disappeared (USB adapter physically detached?) - tore down $BRIDGE_NAME and restored eth0 to br-lan"
+                echo "[sniff.sh watchdog] A bridge member interface ($BR_IFACE1 or $BR_IFACE2) has disappeared - likely a USB adapter physically detached. Bridge torn down, eth0 restored to br-lan automatically (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
+                rm -f "$BRIDGE_STARTED_FILE" "$WATCHDOG_PIDFILE"
+                exit 0
+            fi
             # BIG CHANGE: this used to be this file's OWN independent copy
             # of "is eth0 where it belongs, fix it if not" - the exact
             # logic that caused a real, live-diagnosed incident (this
@@ -1070,8 +1194,13 @@ start_lan_watchdog() {
 }
 
 stop_lan_watchdog() {
+    # BUG FOUND AND FIXED (MAJOR, same PID-reuse gap as start_lan_watchdog's
+    # own "kill existing first" fix above, same call pattern, never carried
+    # over here): a bare kill on whatever WATCHDOG_PIDFILE currently
+    # contains, with no confirmation it's still genuinely the watchdog
+    # subshell. Same pid_running()+"sniff.sh" guard as the other fix.
     if [ -f "$WATCHDOG_PIDFILE" ]; then
-        kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
+        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
         rm -f "$WATCHDOG_PIDFILE"
     fi
     rm -f "$BRIDGE_STARTED_FILE"
@@ -1104,8 +1233,11 @@ if [ "$DO_UNBRIDGE" = "1" ]; then
     # split matters: releasing the DHCP lease can remove br-sniff's own
     # address, which would sever a session connected through it before
     # eth0 is safely back in br-lan).
+    # BUG FOUND AND FIXED (MAJOR, same PID-reuse gap as the other two
+    # WATCHDOG_PIDFILE kill sites in this file - third copy of the same
+    # unguarded pattern, same fix).
     if [ -f "$WATCHDOG_PIDFILE" ]; then
-        kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
+        pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
         rm -f "$WATCHDOG_PIDFILE"
     fi
     rm -f "$BRIDGE_STARTED_FILE"
@@ -1488,6 +1620,7 @@ CREDS_WATCHER_PID=$!
 ( run_packet_feed "$OUTPUT" ) &
 PACKET_FEED_PID=$!
 run_capture
+CAP_RC=$?
 kill "$CREDS_WATCHER_PID" 2>/dev/null
 kill "$PACKET_FEED_PID" 2>/dev/null
 # BUG FOUND AND FIXED (found via code review): the --stop handler above
@@ -1529,6 +1662,39 @@ done
 # network, nothing captured" run, only on tcpdump never getting the file
 # open at all.
 if [ -s "$OUTPUT" ]; then
+    # BUG FOUND AND FIXED (MAJOR - traced directly to this pass's "what if
+    # the USB-A adapter detaches mid-capture" question): the `-s "$OUTPUT"`
+    # check right above (the previous fix, see its own comment) only proves
+    # SOME file got saved - it can't tell a capture that ran its full
+    # requested --duration/--count apart from one that died PARTWAY through
+    # for an external reason and still printed the exact same unqualified
+    # "Done. Saved to $OUTPUT". Concretely: a direct, non-bridged `--iface
+    # eth1` capture with a USB-A adapter that gets physically unplugged
+    # mid-capture - eth1's netdev is unregistered outright (a real USB
+    # removal, not a carrier-down cable-pull), so tcpdump's read on it fails
+    # and it exits well before reaching the requested --duration/--count,
+    # yet whatever it had already written via -U (unbuffered, see that
+    # flag's own comment above) is still a non-empty, "successful-looking"
+    # .pcap. CAP_RC (captured immediately after run_capture, the direct,
+    # non-piped command whose own exit status this is) tells the two cases
+    # apart without needing to touch tcpdump/timeout's invocation at all:
+    # exit 0 covers both "reached --count on its own" and a plain Ctrl+C
+    # (tcpdump's documented SIGINT handling is to print final stats and
+    # exit cleanly, not a raw kill), and exit 124 from `timeout` means
+    # --duration's own deadline fired exactly as intended - both are
+    # genuinely successful endings, not failures. Anything else means
+    # tcpdump/timeout exited on its own, for some other reason, before
+    # either of those - reasoned from tcpdump/timeout's documented exit
+    # semantics per the static-analysis-only scope of this pass (no live
+    # device available to reproduce an actual adapter unplug here), not
+    # asserted as live-confirmed the way this file's other fixes are.
+    if [ "$CAP_RC" != "0" ] && [ "$CAP_RC" != "124" ]; then
+        if ! ip_link show "$IFACE" >/dev/null 2>&1; then
+            err "Capture on '$IFACE' ended EARLY (tcpdump exit code $CAP_RC) - the interface itself disappeared mid-capture, most likely a USB adapter physically detaching. What was captured before that point is still saved below, but this is NOT the full capture that was requested."
+        else
+            err "Capture on '$IFACE' ended early/abnormally (tcpdump exit code $CAP_RC), not from reaching --duration/--count or a normal Ctrl+C. What was captured before that point is still saved below, but this may not be the full capture that was requested."
+        fi
+    fi
     say "Done. Saved to $OUTPUT"
 else
     err "Capture produced no output at $OUTPUT - tcpdump likely never started (bad --filter syntax, '$IFACE' disappearing, or the --output directory not existing/writable). Nothing was captured."

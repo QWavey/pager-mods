@@ -56,6 +56,24 @@ fi
 # can, with no rate limit.
 case "$INTERVAL" in ''|*[!0-9.]*|.|*.*.*) die "'--interval' needs a non-negative number of seconds (got '$INTERVAL')." ;; esac
 
+# _trim STR - strip leading/trailing whitespace, including a bare \r
+# (POSIX [:space:] covers CR too). BUG FOUND AND FIXED: command
+# substitution ($(...)) only strips trailing newlines - a trailing \r or
+# space survives untouched. Verified: `case $'charging\r' in charging)
+# ...` does NOT match and falls through to the catch-all branch. Two
+# call sites in this file compare BATTERY_CHARGING's raw output against
+# literal words ("charging", "true", ...) in a case statement, and on an
+# embedded platform where the underlying command wrapper is prone to
+# CRLF-ish output, an untrimmed value silently misclassifies "charging"
+# as "not charging" - see the fixes below for what that breaks in each
+# case.
+_trim() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 # battery_sysfs_dir - autodetects the Linux power_supply sysfs directory
 # for the battery. Not hardcoded to a specific name - the directory under
 # /sys/class/power_supply/ is driver-dependent (could be "battery",
@@ -134,7 +152,19 @@ battery_extra_info() {
     elif [ -n "$energy_now" ] && [ -n "$energy_full" ] && [ -n "$power_uw" ] && [ "$power_uw" -gt 0 ] 2>/dev/null; then
         mins=$(awk -v full="$energy_full" -v now="$energy_now" -v rate="$power_uw" 'BEGIN { printf "%d", ((full - now) / rate) * 60 }' 2>/dev/null)
     fi
-    if [ -n "${mins:-}" ] && [ "$mins" -gt 0 ] 2>/dev/null; then
+    # BUG FOUND AND FIXED: no upper bound on the computed estimate. Rate
+    # (current_now/power_now) only has to be >0, and a driver reporting a
+    # tiny-but-nonzero rate (e.g. an ADC glitch or a transient reading
+    # during charge-current ramp-up, before it settles to a normal value)
+    # against a real remaining capacity produces a huge, clearly-bogus
+    # ETA that was still displayed as if valid. Verified:
+    #   awk -v full=3000000 -v now=0 -v rate=1 \
+    #     'BEGIN{printf "%d",((full-now)/rate)*60}'  ->  180000000
+    # (~342 years "to full"). Cap at 24h/1440min: no plausible charge on
+    # this device's battery takes longer, so anything past that is noise,
+    # not information - same "print nothing rather than guess" philosophy
+    # already used elsewhere in this function.
+    if [ -n "${mins:-}" ] && [ "$mins" -gt 0 ] 2>/dev/null && [ "$mins" -le 1440 ] 2>/dev/null; then
         [ -n "$out" ] && out="$out, "
         out="${out}~${mins}min to full"
     fi
@@ -144,8 +174,15 @@ battery_extra_info() {
 
 print_battery() {
     local pct charging
-    pct=$(BATTERY_PERCENT 2>/dev/null)
-    charging=$(BATTERY_CHARGING 2>/dev/null)
+    pct=$(_trim "$(BATTERY_PERCENT 2>/dev/null)")
+    # BUG FOUND AND FIXED: raw $charging was matched directly against the
+    # case patterns below. A trailing \r or space (see _trim's comment)
+    # makes a genuine "charging"/"true" value miss every named pattern and
+    # fall into the bare-percentage *) branch, silently dropping the
+    # "(charging)"/"(discharging)" label the whole point of this function
+    # is to add. Verified with the same case-match repro used in the
+    # --watch fix above.
+    charging=$(_trim "$(BATTERY_CHARGING 2>/dev/null)")
 
     if [ "$PERCENT_ONLY" = "1" ]; then
         echo "$pct"
@@ -199,8 +236,17 @@ if [ "$WATCH" = "1" ]; then
     while true; do
         print_battery
         if [ -n "$ALERT_BELOW" ]; then
-            _pct=$(BATTERY_PERCENT 2>/dev/null)
-            _charging=$(BATTERY_CHARGING 2>/dev/null)
+            _pct=$(_trim "$(BATTERY_PERCENT 2>/dev/null)")
+            _charging=$(_trim "$(BATTERY_CHARGING 2>/dev/null)")
+            # BUG FOUND AND FIXED: _pct/_charging used to be compared raw.
+            # A trailing \r or space on _charging (survives $() unstripped)
+            # made "charging" fail to match the pattern below and fall into
+            # the *) branch, i.e. get treated as NOT charging - so a device
+            # that IS charging but crosses below --alert-below on a noisy
+            # reading could still fire a false ALERT. Verified with:
+            #   case $'charging\r' in charging) echo MATCH;; *) echo MISS;; esac
+            # -> MISS. Trimming both values before the case restores the
+            # intended "never alert while actually charging" guarantee.
             case "$_pct" in
                 ''|*[!0-9]*) : ;;  # unreadable this cycle - skip, don't misfire on garbage
                 *)

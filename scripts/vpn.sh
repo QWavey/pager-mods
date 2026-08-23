@@ -109,6 +109,24 @@ openvpn_uptime() {
     case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
     hz=$(getconf CLK_TCK 2>/dev/null)
     case "$hz" in ''|*[!0-9]*) hz=100 ;; esac
+    # BUG FOUND AND FIXED (found via code review, confirmed with an
+    # isolated repro): the case guard above only rejects an empty or
+    # non-digit $hz - it happily accepts a literal "0", which passes
+    # `*[!0-9]*` (every character in "0" IS a digit) even though 0 is
+    # useless as a divisor. Repro of the exact awk line below with hz=0:
+    #   awk -v u="1000" -v st="500" -v hz="0" \
+    #     'BEGIN{v=u-(st/hz); if (v<0) v=0; printf "%d", v}'
+    #   -> awk: cmd. line:1: fatal: division by zero attempted (exit 2)
+    # do_status calls this function as
+    # `ovpn_up=$(openvpn_uptime "$ovpn_pid" 2>/dev/null)`, so the fatal
+    # error is swallowed and uptime is just silently omitted rather than
+    # crashing the script - but that's accidental, not by design, and an
+    # unguarded division is worth closing the same way every other numeric
+    # input in this function already is. getconf should never actually
+    # print "0" for CLK_TCK, but neither should it print garbage, and the
+    # existing guard already defends against that - this closes the one
+    # numeric value ("0") that slips past it.
+    [ "$hz" -eq 0 ] 2>/dev/null && hz=100
     now_uptime=$(awk '{print $1}' /proc/uptime 2>/dev/null)
     case "$now_uptime" in ''|*[!0-9.]*) return 1 ;; esac
     awk -v u="$now_uptime" -v st="$starttime" -v hz="$hz" \
@@ -122,17 +140,47 @@ openvpn_uptime() {
 # already gated behind the same `command -v wg` check do_status uses).
 # A peer that has never handshaked reports timestamp 0, called out
 # explicitly rather than printed as a nonsensical multi-decade duration.
+# BUG FOUND AND FIXED (found via code review of the new procfs/wg-tools
+# status code, confirmed with an isolated repro): the $ts field read from
+# 'wg show all latest-handshakes' went straight into bash arithmetic
+# (`ago=$((now - ts))`) with no numeric validation, unlike every other
+# externally-sourced numeric field in this file (starttime and now_uptime in
+# openvpn_uptime(), and fmt_duration()'s own input, are all case-guarded
+# before arithmetic). Repro: feed the while-loop a line whose 3rd field
+# isn't numeric (e.g. wg-tools output that's malformed, truncated, or from a
+# future/older format) - `ago=$((now - ts))` with ts="notanumber" doesn't
+# just fail cleanly, bash's arithmetic evaluator re-parses a non-numeric
+# operand AS A VARIABLE NAME, and under this script's `set -u` an undefined
+# one aborts with "notanumber: unbound variable". Standalone test
+# (/tmp/wgtest.sh, mirroring this exact function against a 2-line piped
+# input where only the FIRST peer's timestamp is bad):
+#   BEFORE wg_handshakes
+#   line 24: notanumber: unbound variable
+#   AFTER wg_handshakes, exit=1
+#   SCRIPT CONTINUES TO END
+# Because the loop is the read side of a pipe, the crash only kills that
+# subshell rather than all of vpn.sh - but it kills it immediately, so the
+# SECOND peer (a perfectly good, later line in the same wg output) never
+# gets read or printed either, and do_status shows no error at all: it
+# already said "Wireguard: ... looks up." beforehand and simply continues,
+# silently under-reporting how many peers are actually connected. For a
+# security-relevant status command that is materially misleading, not
+# cosmetic. Fixed by validating $ts the same way every other numeric field
+# in this file already is, and reporting (not skipping) a malformed line
+# instead of letting it take down the rest of the listing.
 wg_handshakes() {
     local now line iface peer ts ago
     now=$(date +%s 2>/dev/null) || return 1
     wg show all latest-handshakes 2>/dev/null | while read -r iface peer ts; do
         [ -n "$iface" ] || continue
-        if [ "${ts:-0}" = "0" ]; then
-            say "  $iface peer ${peer:0:12}...: no handshake yet"
-        else
-            ago=$((now - ts))
-            say "  $iface peer ${peer:0:12}...: last handshake $(fmt_duration "$ago") ago"
-        fi
+        case "${ts:-0}" in
+            0) say "  $iface peer ${peer:0:12}...: no handshake yet" ;;
+            *[!0-9]*) say "  $iface peer ${peer:0:12}...: unrecognized handshake timestamp '$ts'" ;;
+            *)
+                ago=$((now - ts))
+                say "  $iface peer ${peer:0:12}...: last handshake $(fmt_duration "$ago") ago"
+                ;;
+        esac
     done
 }
 

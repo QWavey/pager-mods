@@ -286,6 +286,27 @@ esac
 # interpretation up front (bash's `10#$choice` prefix) neutralizes the
 # octal reinterpretation before it ever reaches an array subscript.
 choice=$((10#$choice))
+# BUG FOUND AND FIXED (re-audit of tonight's own `10#$choice` fix, verified
+# with a standalone `bash -c` repro): forcing base-10 stops the octal
+# misparse, but it does NOT make $choice a safe array subscript on its own -
+# bash arithmetic is a fixed-width (64-bit) integer, and a long-enough
+# all-digit string (still passes the earlier digit-only case check, since
+# every character IS 0-9) overflows it. Confirmed live: choice=
+# "18446744073709551615" (2^64-1) evaluates to -1, and bash (4.3+) treats a
+# NEGATIVE array subscript as "index from the end" for indexed arrays - so
+# ${PATHS[-1]} silently returned the LAST listed payload instead of hitting
+# "Invalid selection.", completely bypassing the intended bounds check
+# (verified: PATHS=(x a b c d e); choice=$((10#18446744073709551615))
+# leaves choice=-1, and ${PATHS[$choice]} = "e"). Smaller overflow values
+# land on other negative indices, so a specific out-of-range digit string
+# could be used to launch an arbitrary payload from the end of the list
+# rather than being rejected. An explicit numeric range check bounds
+# $choice to [1, i] BEFORE it's ever used as a subscript, which catches
+# every overflowed value (they're always <1 or >i for any realistic
+# listing) regardless of how the 64-bit wraparound landed.
+if [ "$choice" -lt 1 ] || [ "$choice" -gt "$i" ]; then
+    die "Invalid selection."
+fi
 [ -z "${PATHS[$choice]:-}" ] && die "Invalid selection."
 
 if confirm "Run this in the background instead of the foreground?"; then

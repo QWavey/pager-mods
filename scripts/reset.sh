@@ -253,7 +253,34 @@ reset_processes() {
     # can't restore SSH/undo a bridge by itself. This only stops the
     # runaway monitoring loop from continuing to interfere regardless of
     # which reset scope was picked.
-    [ -f /tmp/pager-sniff-watchdog.pid ] && { kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null; rm -f /tmp/pager-sniff-watchdog.pid; }
+    #
+    # BUG FOUND AND FIXED (bug-hunt pass): this killed whatever PID the
+    # pidfile named with a bare `kill`, no identity check first - exactly
+    # the PID-reuse gap pid_running() in lib/common.sh was built to close
+    # (see its own comment: a process that died without reaching its
+    # cleanup - a crash, an external `kill -9`, anything that skips the
+    # `rm -f "$PIDFILE"` its own exit path would normally do - leaves a
+    # stale PID number that the OS can later hand to a completely
+    # unrelated process, e.g. sshd or a cron job). Every other tracked
+    # background process in this toolkit already goes through
+    # pid_running() with its own script name as NAME_PATTERN before ever
+    # being killed (bluetooth.sh/crash_logger.sh/deauth.sh/sniff.sh/
+    # tracer.sh/usb_monitor.sh/PayloadRunner.sh - common.sh's own
+    # pid_running() comment lists this exact watchdog's parent, sniff.sh,
+    # among them) - this line was the one kill site in the whole toolkit
+    # that still bypassed that guard, added after pid_running() was
+    # hardened for PID-reuse (so it never got swept up in that pass).
+    # Confirmed real: the watchdog is a bash subshell of sniff.sh (started
+    # via `( ... ) &` inside it, not `exec`'d), so its real
+    # /proc/PID/cmdline still shows "sniff.sh" - pid_running()'s pattern
+    # match works on it exactly like every other caller. The pidfile is
+    # still always removed either way (a stale/incorrect pidfile is
+    # cleaned up regardless); only the kill signal itself is now gated on
+    # actually confirming the PID is still a live sniff.sh process first.
+    if [ -f /tmp/pager-sniff-watchdog.pid ]; then
+        pid_running /tmp/pager-sniff-watchdog.pid sniff.sh && kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null
+        rm -f /tmp/pager-sniff-watchdog.pid
+    fi
     if [ -n "$failed_scripts" ]; then
         err "These scripts' --stop returned a non-zero exit (unexpected - every --stop handler in this toolkit normally exits 0 either way):$failed_scripts"
     else
@@ -374,8 +401,17 @@ reset_network() {
     # bash process - stopping it touches no networking, so it's always
     # safe to do first); the DHCP release and br-sniff teardown itself
     # move to after the reload/restore below.
+    # BUG FOUND AND FIXED (bug-hunt pass, same class as reset_processes()'s
+    # matching watchdog-kill above): this was also a bare `kill` on the
+    # pidfile's PID with no identity check - same PID-reuse gap
+    # pid_running() already guards against for every OTHER tracked
+    # process in this toolkit (see the longer comment on reset_processes()'s
+    # copy of this fix for the full reasoning). Kept the "kill and clear the
+    # pidfile" ordering identical to before - only the kill itself is now
+    # gated on pid_running() confirming the PID is still actually a live
+    # sniff.sh process before signaling it.
     if [ -f /tmp/pager-sniff-watchdog.pid ]; then
-        kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null
+        pid_running /tmp/pager-sniff-watchdog.pid sniff.sh && kill "$(cat /tmp/pager-sniff-watchdog.pid)" 2>/dev/null
         rm -f /tmp/pager-sniff-watchdog.pid
     fi
     say "Reloading network config from the device's own saved settings (standard OpenWRT operation - doesn't change anything, just re-applies what's already configured)..."

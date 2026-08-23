@@ -66,12 +66,27 @@ detect_usb_c_peer() {
     sort -rn /tmp/dhcp.leases 2>/dev/null | head -1
 }
 
+# BUG FOUND AND FIXED (matches an already-confirmed live failure mode on
+# this exact device, not yet applied here): these two `ip` calls talk to
+# the same rtnetlink socket family as `ip link` - the exact thing
+# lib/common.sh's own ip_link() wrapper exists to guard, after a plain
+# `ip link` call was confirmed live to wedge indefinitely on a confused
+# netlink socket and take SSH-over-USB-C down with it (see ip_link()'s own
+# header). is_wifi_connected()/connected_bssid() in lib/common.sh were
+# already fixed for the identical gap (a plain, unguarded `ip`/`iw` call),
+# but this file's own detect_usb_a_peer() - reached on every single
+# `--detect` and therefore first thing every pc_link_recon payload run -
+# was never brought in line with that fix. A wedge here means the payload
+# hangs indefinitely before ever reaching a capture, the same "looks like
+# a stuck 'Starting...' splash" class of incident ip_link() was built to
+# prevent elsewhere. Reusing the shared IP_LINK_TIMEOUT (from lib/common.sh,
+# sourced above) instead of adding a second timeout knob for the same risk.
 detect_usb_a_peer() {
     local ifn="$1" gw
     iface_has_carrier "$ifn" || { echo ""; return; }
-    gw=$(ip route show dev "$ifn" 2>/dev/null | awk '/^default/ {print $3; exit}')
+    gw=$(timeout "$IP_LINK_TIMEOUT" ip route show dev "$ifn" 2>/dev/null | awk '/^default/ {print $3; exit}')
     if [ -n "$gw" ]; then echo "$gw"; return; fi
-    ip neigh show dev "$ifn" 2>/dev/null | awk '{print $1; exit}'
+    timeout "$IP_LINK_TIMEOUT" ip neigh show dev "$ifn" 2>/dev/null | awk '{print $1; exit}'
 }
 
 report_detect() {

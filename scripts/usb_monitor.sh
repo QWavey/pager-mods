@@ -354,9 +354,50 @@ run_monitor() {
     say "Stopped."
 }
 
+# BUG FOUND AND FIXED (CRITICAL - root-caused live tonight): a real detach
+# event ("USB-A (eth1): detached" / "USB-A: device detached (bus 1-1.1)")
+# was confirmed on the device's own persistent on-screen Log view (fired by
+# notify()'s LOG() call below) but was completely missing from THIS
+# script's own $LOGFILE - which had only the startup banner, nothing else.
+# Traced notify() itself first: it always calls say() (writes to this
+# process's stdout, redirected into $LOGFILE) and LOG() together, back to
+# back, with no branch that could fire one and skip the other - so the gap
+# isn't in notify(). The actual root cause is one line down from here:
+# `>"$LOGFILE"` TRUNCATES the file on every single --background launch,
+# and --background gets re-invoked against an already-healthy, already-
+# running instance by TWO entirely normal parts of this toolkit's own
+# workflow, not just a crash: setup.py restarts usb_monitor.sh whenever
+# this script's own content changed since the last deploy (see setup.py's
+# usb_monitor_changed check) - exactly what an active bug-hunt/dev session
+# does all night, redeploying fixes repeatedly - and reset.sh's
+# ensure_usb_monitor() restarts it whenever --status doesn't report
+# Running for any reason. Either path wipes out everything the PREVIOUS
+# instance had already logged (including a real detach from minutes
+# earlier) the moment the new instance's redirection opens, while LOG()'s
+# target - the device's own persistent on-screen Log view, a store this
+# script doesn't own and never touches - is completely unaffected and
+# keeps the full history. Fixed by appending (`>>`) instead of truncating,
+# so a restart's own startup banner is ADDED to prior history instead of
+# replacing it. Bounded the same way lib/common.sh's own topology_log()
+# already bounds itself (trim to the most recent 500 lines once the file
+# passes 1000) so this can't grow without limit across a device's whole
+# uptime through many redeploys/restarts either - done here at launch time
+# only (not periodically mid-run): this process's own stdout fd stays
+# pinned to $LOGFILE's inode for its entire run via the shell redirection
+# below, so a rename-based trim done BY THIS SAME PROCESS while that fd is
+# still open would silently keep writing to the old, now-unlinked inode
+# instead of the replacement file - safe to do here, before the fd for
+# THIS run is ever opened, not safe to repeat once it is.
 if [ "$BACKGROUND" = "1" ]; then
     if is_running; then die "Already running (PID $(cat "$PIDFILE")). Use --stop first."; fi
-    ( trap '' HUP; run_monitor ) >"$LOGFILE" 2>&1 &
+    if [ -f "$LOGFILE" ]; then
+        _usbmon_log_lines=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
+        if [ "${_usbmon_log_lines:-0}" -gt 1000 ] 2>/dev/null; then
+            tail -n 500 "$LOGFILE" >"${LOGFILE}.tmp.$$" 2>/dev/null && mv "${LOGFILE}.tmp.$$" "$LOGFILE" 2>/dev/null
+            rm -f "${LOGFILE}.tmp.$$" 2>/dev/null
+        fi
+    fi
+    ( trap '' HUP; run_monitor ) >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     say "Started (PID $(cat "$PIDFILE")). Log: $LOGFILE"
     exit 0

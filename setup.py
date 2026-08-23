@@ -479,6 +479,21 @@ USB_MONITOR_AUTOSTART_LINE = "[ -x /root/scripts/usb_monitor.sh ] && /root/scrip
 def ensure_usb_monitor_autostart(client, log):
     try:
         sftp = client.open_sftp()
+        # BUG FOUND AND FIXED: this is a third, independent SFTP session
+        # (client.open_sftp() opens a brand-new channel - it does not share
+        # the timeout of the sftp objects in main()) and it never got the
+        # same fix already applied to those other two at lines 616/711
+        # above. Without it, sftp.open()'s read()/write() here could block
+        # forever on a stalled connection (WiFi drop mid-write) instead of
+        # raising - and since this call is writing to /etc/rc.local, a
+        # system boot file, on a device that had already just been power-
+        # cycled/rebooted once tonight (see this function's own docstring
+        # comment above), a hang here is a real, not theoretical, risk.
+        # Worse: while hung, the broad `except Exception` below never even
+        # fires (there's nothing to catch yet), so the "WARNING: could not
+        # ensure..." message would never print either - just a silent
+        # indefinite hang with no diagnostic at all. Same fix, same reason.
+        sftp.get_channel().settimeout(30)
         try:
             with sftp.open("/etc/rc.local", "r") as f:
                 content = f.read().decode("utf-8", errors="replace")

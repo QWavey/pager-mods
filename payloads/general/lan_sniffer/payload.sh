@@ -247,6 +247,25 @@ stop_scroll() {
     SCROLLER_PID=""
 }
 
+# BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): start_scroll()'s
+# background poller (a `while :; sleep 1; done` subshell tailing
+# /tmp/pager-sniff.log) was ONLY ever stopped via the explicit
+# stop_scroll() calls inside run_live_capture's own pause/stop/duration-
+# elapsed code paths. Bash does not kill background jobs when their
+# parent script exits (that's only `huponexit`, which doesn't apply to a
+# non-interactive script) - so if this script exits by ANY other route
+# (the platform force-stopping the payload, a signal, an unexpected
+# error) while the scroller is running, the poller subshell is orphaned
+# and keeps running forever, calling LOG every second indefinitely -
+# the exact "background helper survives its parent" class already
+# confirmed live tonight for a bridge watchdog. This applies to BOTH menu
+# paths, including Quick Capture, which had no trap coverage at all.
+# Fixed with a baseline `trap 'stop_scroll' EXIT` here, active from this
+# point on regardless of which mode runs; the Bridge/tap branch below
+# installs its own trap that also unbridges, which folds this same
+# stop_scroll call in rather than losing it.
+trap 'stop_scroll' EXIT
+
 # run_live_capture IFACE FILTER DURATION - shared by both Quick Capture and
 # Bridge/tap below, so the live-scroll/pause/stop behavior is identical
 # either way instead of duplicated (and possibly drifting) in two places.
@@ -415,6 +434,26 @@ case "$__mode" in
         ( timeout 60 /root/scripts/sniff.sh --bridge eth0 "$__a" -y >/tmp/pager-sniff-bridge-out.log 2>&1
           echo $? >/tmp/pager-sniff-bridge-rc ) &
         __bridge_pid=$!
+        # BUG FOUND AND FIXED (CRITICAL, fresh-eyes review): the unbridge
+        # trap used to be installed much further below, only AFTER
+        # --bridge had already been confirmed to succeed. That left this
+        # entire background-launch + progress-polling window (from here
+        # down to where the exit code is read) with NO trap installed at
+        # all - if the payload process is killed (platform force-quit, a
+        # fatal error - anything short of SIGKILL/power-loss, see the
+        # honest limitation noted further down) WHILE this loop is still
+        # polling, the bridge is left up with nothing to tear it down:
+        # the exact orphan class confirmed live tonight against sniff.sh's
+        # own bridge watchdog, just triggered from inside the payload
+        # instead of a raw SSH command. Installed here instead so the
+        # ENTIRE window - setup polling included, not just what comes
+        # after - is covered. Combines unbridge with stop_scroll (a no-op
+        # via its own `[ -n "$SCROLLER_PID" ]` guard until the live view
+        # actually starts) into one trap, replacing the baseline
+        # `trap 'stop_scroll' EXIT` set near the top of the script, so
+        # both cleanups are covered no matter when in this flow things
+        # stop.
+        trap 'stop_scroll; timeout 30 /root/scripts/sniff.sh --unbridge -y >/dev/null 2>&1' EXIT
         __bridge_last=0
         __bridge_total=8
         while kill -0 "$__bridge_pid" 2>/dev/null; do
@@ -497,7 +536,22 @@ case "$__mode" in
         # internally, but an outer timeout here is a cheap extra backstop
         # against anything else unforeseen, same reasoning as the --bridge
         # call above.
-        trap 'timeout 30 /root/scripts/sniff.sh --unbridge -y >/dev/null 2>&1' EXIT
+        #
+        # NOTE: the actual `trap ... EXIT` call that does this now lives
+        # further up, right after the background --bridge command is
+        # launched - see the comment there for why (it needs to cover the
+        # progress-polling loop too, not just what happens after it).
+        #
+        # HONEST LIMITATION (not fixable from inside this script): bash
+        # EXIT traps run on normal exit and on ordinary catchable signals
+        # (SIGTERM/SIGINT/etc.), but NEVER on SIGKILL - the kernel
+        # delivers SIGKILL directly and terminates the process without
+        # running any userspace code, trap included, and the same is true
+        # if the device simply loses power. So a SIGKILL (or a power
+        # loss) during the bridge-setup window still orphans the bridge
+        # with no way for this script to prevent it - only an external
+        # watchdog outside this process (like the one sniff.sh itself now
+        # has, per tonight's fix there) can catch that specific case.
         __dur=$(pick_duration) || exit 0
         # BUG FOUND AND FIXED: this never checked whether run_live_capture
         # actually got anywhere (see its own new liveness check) before

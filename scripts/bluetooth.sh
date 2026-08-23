@@ -359,6 +359,36 @@ ensure_radio_up() {
 # have failed, and one optional extra success note) varies between callers.
 launch_background() {
     local run_func="$1" label="$2" reason="$3" extra="${4:-}"
+    # BUG FOUND AND FIXED (found via code review, re-auditing tonight's DRY
+    # pass): none of --flood/--jam-area/--disrupt's background paths ever
+    # checked whether a background run was ALREADY active before starting
+    # another one - `echo $! > "$PIDFILE"` below unconditionally overwrites
+    # PIDFILE (and, on success, TECHFILE) with the NEW technique's PID. The
+    # PREVIOUS technique's process keeps running completely untracked:
+    # --status can no longer see it (it only ever reads the current
+    # PIDFILE/TECHFILE) and --stop can no longer reach it (it only ever
+    # kills the PID currently in PIDFILE). Traced the worst case: if the
+    # orphaned one is run_disrupt, its while-loop keeps cycling LE
+    # Transmitter Test indefinitely (no --duration), its own EXIT trap never
+    # fires (nothing ever signals that PID again), and the radio is left
+    # stuck transmitting Direct Test Mode forever - exactly the "unusable
+    # Bluetooth until reset/reboot" failure --stop's unconditional LE Test
+    # End and run_disrupt's own EXIT trap exist specifically to prevent,
+    # just reached via a different path (a second background launch instead
+    # of an unclean stop) that neither of those safeguards covers, since
+    # both are keyed off the PIDFILE this bug causes to be overwritten.
+    # Refusing a second background launch while one is already
+    # tracked-and-alive closes this off in the one place all three
+    # background paths go through, instead of needing the same guard added
+    # at each of the three call sites (and forgotten at a future fourth).
+    if is_running; then
+        local running_label="a technique" _l="" _s=""
+        if [ -r "$TECHFILE" ]; then
+            IFS='|' read -r _l _s < "$TECHFILE"
+            [ -n "$_l" ] && running_label="$_l"
+        fi
+        die "$running_label is already running in the background (PID $(cat "$PIDFILE")) - run 'bluetooth --stop' first before starting $label, or it'll be orphaned (untracked, unstoppable, and if it's --disrupt, the radio gets left stuck transmitting)."
+    fi
     ( trap '' HUP; "$run_func" ) >"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1

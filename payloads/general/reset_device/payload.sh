@@ -83,13 +83,51 @@ LOG_FILE="/tmp/pager-reset.log"
     while :; do
         __total=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
         if [ "$__total" -gt "$__last" ] 2>/dev/null; then
-            tail -n "+$((__last + 1))" "$LOG_FILE" 2>/dev/null | while IFS= read -r __line; do LOG "$__line"; done
+            # BUG FOUND AND FIXED (same class already found and fixed
+            # this session in the LAN Sniffer payload's own start_scroll(),
+            # missed here since this is a separate poller): this used to
+            # call LOG once PER NEW LINE via a `while read` loop - during
+            # a step that logs several lines at once (a sub-reset with its
+            # own multi-line output, or several ERROR: lines from more
+            # than one failed sub-step), a single poll cycle could queue
+            # multiple separate LOG calls back to back. The LAN Sniffer
+            # fix (this session) found that a backlog of individually-
+            # queued LOG calls keeps visibly scrolling for a while even
+            # after the process that queued them has moved on or stopped -
+            # exactly the kind of confusing delay this device's own
+            # recovery tool can least afford. Batched into one LOG call
+            # per poll tick (embedded newlines, already proven to render
+            # fine) instead, same fix, same cap (40 lines/tick with a
+            # skipped-count note) so a single huge burst can't become one
+            # enormous, slow-to-render LOG call either.
+            __new_count=$((__total - __last))
+            if [ "$__new_count" -gt 40 ]; then
+                __chunk="-- $((__new_count - 40)) line(s) skipped --
+$(tail -n 40 "$LOG_FILE" 2>/dev/null)"
+            else
+                __chunk=$(tail -n "+$((__last + 1))" "$LOG_FILE" 2>/dev/null)
+            fi
+            LOG "$__chunk"
             __last="$__total"
         fi
         sleep 1
     done
 ) &
 __tail_pid=$!
+# BUG FOUND AND FIXED (same orphaned-background-process class confirmed
+# live tonight, and already found and fixed this session in the LAN
+# Sniffer payload's own scroller): the ONLY thing that ever killed this
+# poller was the explicit `kill "$__tail_pid"` further down, reached only
+# after `wait "$__reset_pid"` returns. Bash does not kill background jobs
+# when their parent script exits (that's only `huponexit`, which doesn't
+# apply here) - so if this script is killed or exits abnormally before
+# reaching that line (a signal, an unforeseen error), this infinite
+# `while :; sleep 1; done` poller is orphaned and keeps polling/LOG-ing
+# forever. Fixed with an EXIT trap so it's stopped no matter how this
+# script exits from here on; the explicit kill below still runs first on
+# the normal path; killing an already-dead PID via the trap afterward is
+# a harmless no-op.
+trap 'kill "$__tail_pid" 2>/dev/null' EXIT
 sleep 0.2
 
 /root/scripts/reset.sh $__flag -y > "$LOG_FILE" 2>&1 &
