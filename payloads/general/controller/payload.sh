@@ -153,8 +153,14 @@ theme_wifi() {
 # -- LAN --------------------------------------------------------------------
 theme_lan() {
     local a
-    a=$(LIST_PICKER "LAN" "Deep scan" "Auto-pwn (deep)" "DNS spoof" "LAN kill (DeadNet)" "Back" "Deep scan") || return
+    a=$(LIST_PICKER "LAN" "Deep scan" "Auto-pwn (deep)" "Client-isolation test" "DNS spoof" "LAN kill (DeadNet)" "Back" "Deep scan") || return
     case "$a" in
+    "Client-isolation test")
+        need clientiso.sh || return
+        LOG "Testing client isolation on eth1 (can peers reach each other?)..."
+        LOG "$("$S/clientiso.sh" --iface eth1 2>&1)"
+        ALERT "Isolation test done - see log"
+        ;;
     "Auto-pwn (deep)")
         need lanpwn.sh || return
         CONFIRMATION_DIALOG "Discover the wired LAN (eth1), scan services, then try default creds + SMB loot + NSE? Authorized network only!" || return
@@ -286,8 +292,31 @@ theme_dualradio() {
         return
     fi
     local a
-    a=$(LIST_PICKER "Dual-Radio ($ext found)" "Evil-twin + deauth herd" "Adapter info" "Back" "Adapter info") || return
+    a=$(LIST_PICKER "Dual-Radio ($ext found)" "Evil-twin + deauth herd" "Rogue 5GHz AP" "Adapter info" "Back" "Adapter info") || return
     case "$a" in
+    "Rogue 5GHz AP")
+        need rogueap.sh || return
+        local ssid pw uplink
+        ssid=$(TEXT_PICKER "Rogue AP SSID" "") || return
+        [ -z "$ssid" ] && { ERROR_DIALOG "SSID cannot be empty."; return; }
+        pw=$(TEXT_PICKER "WPA2 password (blank = open)" "") || return
+        if CONFIRMATION_DIALOG "Give clients real internet via eth1 uplink? (No = capture-only AP)"; then
+            uplink="--uplink eth1"
+        else
+            uplink=""
+        fi
+        local pwarg=""; [ -n "$pw" ] && pwarg="--pass $pw"
+        LOG "Standing up 5GHz rogue AP '$ssid' on $ext (ch 36)..."
+        "$S/rogueap.sh" --up --ssid "$ssid" --iface "$ext" --channel 36 $pwarg $uplink -y >/tmp/pager-controller.log 2>&1
+        if [ $? -ne 0 ]; then
+            ERROR_DIALOG "Rogue AP failed - see /tmp/pager-controller.log (adapter may not support 5GHz AP mode)."
+            return
+        fi
+        ALERT "Rogue 5GHz AP '$ssid' up - press B to stop"
+        WAIT_FOR_BUTTON_PRESS B
+        "$S/rogueap.sh" --down --iface "$ext" ${uplink} -y >/dev/null 2>&1
+        LOG "Rogue AP torn down."; ALERT "Rogue AP stopped"
+        ;;
     "Evil-twin + deauth herd")
         # Real dual-radio combo achievable with the current tools: the clone
         # AP runs on the internal radio0 (EvilTwin.sh) while deauth runs on

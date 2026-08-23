@@ -23,9 +23,9 @@ offload).
 - [H] **W5** WPS Pixie-Dust  (wpskit.sh: wash scan validated live + reaver pixie; attack needs A8000/target — wired in Controller)
 - [x] **W6** Targeted deauth  (deauth.sh — wired in Controller)
 - [x] **W7** SSID beacon flood  (ssidpool.sh — wired)
-- [ ] **W8** Client-isolation tester  (probe peer reachability on the AP subnet)
+- [x] **W8** Client-isolation tester  (clientiso.sh: discover peers, probe reachability vs gateway — wired in Controller LAN)
 - [x] **W9** PMF / 802.11w posture test  (airscout.sh reports PMF required/optional/off per AP — validated live)
-- [ ] **W12** Rogue 5GHz twin  (hostapd on 5GHz / external adapter)
+- [H] **W12** Rogue 5GHz twin  (rogueap.sh: hostapd+dnsmasq on the A8000, 5GHz, optional NAT uplink — wired in Dual-Radio; needs A8000)
 - [x] **W13** Client OS fingerprint (air)  (airscout.sh: probe-request IE fingerprint + rand-MAC flag — validated live, wired in Controller)
 - [x] **W3** Karma / known-beacon twin  (EvilTwin.sh — wired)
 
