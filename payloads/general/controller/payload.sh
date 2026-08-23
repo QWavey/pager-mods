@@ -19,6 +19,12 @@
 # explicitly authorized to test.
 
 S=/root/scripts
+CONTROLLER_LIB="$(dirname "$0")/lib"
+
+# Source the tool UI library for on-screen parameter gathering + state persistence
+if [ -f "$CONTROLLER_LIB/tool_ui.sh" ]; then
+    . "$CONTROLLER_LIB/tool_ui.sh"
+fi
 
 # need SCRIPT - guard that a backing script is present; ERROR_DIALOG + fail
 # if not, so a half-deployed toolkit gives a clear message instead of a
@@ -181,9 +187,7 @@ theme_lan() {
     case "$a" in
     "Topology map")
         need topomap.sh || return
-        LOG "Mapping the LAN topology from eth1 (listening for LLDP/CDP + probing upward)..."
-        LOG "$("$S/topomap.sh" --iface eth1 --seconds 20 -y 2>&1 | tail -40)"
-        ALERT "Topology map done - see log + /root/loot/topomap/"
+        tool_topomap_menu
         ;;
     "Client-isolation test")
         need clientiso.sh || return
@@ -390,47 +394,19 @@ theme_dualradio() {
 # -- Implant ----------------------------------------------------------------
 theme_implant() {
     local a
-    a=$(LIST_PICKER "Implant" "Device clone (whitelist bypass)" "DNS walled-garden" "Stealth intercept (hang net)" "Out-of-band mgmt AP" "USB-C gadget drop (planned)" "Back" "Device clone (whitelist bypass)") || return
+    a=$(LIST_PICKER "Implant" "USB-C Device Clone" "DNS Walled-Garden" "Stealth Intercept" "Out-of-band Mgmt AP" "USB-C Gadget Drop (planned)" "Back" "USB-C Device Clone") || return
     case "$a" in
-    "Device clone (whitelist bypass)")
+    "USB-C Device Clone")
         need usbclone.sh || return
-        local sub
-        sub=$(LIST_PICKER "Device clone" "1. Capture PC identity (USB-C)" "2. Clone onto LAN (eth1)" "Restore eth1" "Status" "1. Capture PC identity (USB-C)") || return
-        case "$sub" in
-        "1. Capture PC identity (USB-C)")
-            LOG "$("$S/usbclone.sh" --capture -y 2>&1)"; ALERT "Identity capture - see log" ;;
-        "2. Clone onto LAN (eth1)")
-            CONFIRMATION_DIALOG "Clone the captured identity onto eth1 and DHCP onto the LAN?" || return
-            LOG "$("$S/usbclone.sh" --clone -y 2>&1)"; ALERT "Clone applied - see log" ;;
-        "Restore eth1")
-            LOG "$("$S/usbclone.sh" --restore -y 2>&1)"; ALERT "eth1 restored" ;;
-        "Status")
-            LOG "$("$S/usbclone.sh" --status -y 2>&1)"; ALERT "Status in log" ;;
-        esac
+        tool_usbclone_menu
         ;;
-    "DNS walled-garden")
+    "DNS Walled-Garden")
         need walledgarden.sh || return
-        local ip
-        ip=$(TEXT_PICKER "Allowed IP (every lookup resolves here)" "172.16.52.1") || return
-        CONFIRMATION_DIALOG "Trap the tethered host: every DNS answer -> $ip, until you press B?" || return
-        if ! "$S/walledgarden.sh" --on --ip "$ip" --lock -y >/tmp/pager-controller.log 2>&1; then
-            ERROR_DIALOG "Walled garden failed - see /tmp/pager-controller.log."; return
-        fi
-        ALERT "Walled garden up - press B to stop"
-        WAIT_FOR_BUTTON_PRESS B
-        "$S/walledgarden.sh" --off -y >/dev/null 2>&1
-        LOG "Walled garden off."; ALERT "Walled garden off"
+        tool_walledgarden_menu
         ;;
-    "Stealth intercept (hang net)")
+    "Stealth Intercept")
         need stealthnet.sh || return
-        CONFIRMATION_DIALOG "Make the tethered host's internet 'hang' while silently capturing it, until B?" || return
-        if ! "$S/stealthnet.sh" --on -y >/tmp/pager-controller.log 2>&1; then
-            ERROR_DIALOG "Stealth intercept failed - see log (needs a working uplink)."; return
-        fi
-        ALERT "Stealth intercept up - press B to stop"
-        WAIT_FOR_BUTTON_PRESS B
-        "$S/stealthnet.sh" --off -y >/dev/null 2>&1
-        LOG "Stealth intercept off - host internet restored."; ALERT "Restored"
+        tool_stealthnet_menu
         ;;
     "Out-of-band mgmt AP")
         need mgmt.sh || return
