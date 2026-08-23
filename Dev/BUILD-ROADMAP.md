@@ -24,9 +24,9 @@ offload).
 - [x] **W6** Targeted deauth  (deauth.sh — wired in Controller)
 - [x] **W7** SSID beacon flood  (ssidpool.sh — wired)
 - [ ] **W8** Client-isolation tester  (probe peer reachability on the AP subnet)
-- [ ] **W9** PMF / 802.11w posture test  (deauth + observe effect)
+- [x] **W9** PMF / 802.11w posture test  (airscout.sh reports PMF required/optional/off per AP — validated live)
 - [ ] **W12** Rogue 5GHz twin  (hostapd on 5GHz / external adapter)
-- [ ] **W13** Client OS fingerprint (air)  (scapy probe-request IE parsing)
+- [x] **W13** Client OS fingerprint (air)  (airscout.sh: probe-request IE fingerprint + rand-MAC flag — validated live, wired in Controller)
 - [x] **W3** Karma / known-beacon twin  (EvilTwin.sh — wired)
 
 ## Cluster C — Wired LAN offense (USB-A adapter)

@@ -40,8 +40,16 @@ need() {
 theme_wifi() {
     need deauth.sh || return
     local a
-    a=$(LIST_PICKER "WiFi" "Deauth a target" "Handshake/PMKID capture" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
+    a=$(LIST_PICKER "WiFi" "Air recon (APs/clients)" "Deauth a target" "Handshake/PMKID capture" "Evil Twin (clone AP)" "Beacon flood (SSID pool)" "Back" "Deauth a target") || return
     case "$a" in
+    "Air recon (APs/clients)")
+        need airscout.sh || return
+        local secs
+        secs=$(NUMBER_PICKER "Listen seconds" "20") || return
+        LOG "Passively listening on wlan1mon for ${secs}s (APs + PMF posture + client probes)..."
+        LOG "$("$S/airscout.sh" --seconds "$secs" --mode both 2>&1)"
+        ALERT "Air recon done - see log (PMF 'off' = soft deauth target)"
+        ;;
     "Handshake/PMKID capture")
         need wifikit.sh || return
         # hcxdumptool needs a dedicated raw radio and refuses the internal

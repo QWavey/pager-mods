@@ -32,7 +32,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 
 export PATH="$PATH:/mmc/usr/bin:/mmc/usr/sbin"
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/mmc/usr/lib"
+# /mmc/usr/lib/samba holds smbclient's private libs (libsecrets3-samba4.so etc)
+# in a subdir that isn't on the default loader path - add it explicitly.
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/mmc/usr/lib:/mmc/usr/lib/samba"
 
 LOOT_BASE="/root/loot/lanpwn"
 IFACE="eth1"; SUBNET=""; MODE=""; NSE_SCRIPTS="default,banner"
