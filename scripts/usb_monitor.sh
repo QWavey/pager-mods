@@ -58,6 +58,25 @@ set -u
 TOOL_NAME="usb_monitor.sh"
 PIDFILE="/tmp/pager-usbmon.pid"
 LOGFILE="/tmp/pager-usbmon.log"
+# USB_A_STATEFILE - JUDGMENT CALL (integration question, see run_monitor's
+# publish site below for the full reasoning): this script already re-derives
+# USB-A's interface-presence state every 2s as a side effect of its own
+# carrier polling - a plain "attached"/"detached" text file, written only on
+# a real transition, costs almost nothing extra and gives ANY other script a
+# cheaper/faster way to notice a USB-A interface disappearing than running
+# its own `ip link show`/dmesg check. sniff.sh's own bridge watchdog (fixed
+# earlier tonight, in sniff.sh, not here) already polls `ip link show` on
+# its bridge members every 5s (plus up to 2 more retry-seconds before it
+# acts) - this script's 2s loop can, at best, notice the same physical
+# detach ~3-5s sooner. That's a real but modest win, not a correctness fix:
+# sniff.sh's own poll is already a complete, self-contained safety net on
+# its own. This file is published unconditionally, whether or not anything
+# is currently reading it - usb_monitor.sh does not know or care who (if
+# anyone) consumes it, and never touches bridges/captures itself. A
+# consumer should treat it as an early advisory hint to check sooner, NOT
+# as an authoritative replacement for its own check - it goes stale the
+# moment usb_monitor.sh isn't running, with nothing here to signal that.
+USB_A_STATEFILE="/tmp/pager-usb-a-state"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/lib/common.sh"
 usage() { print_help "$0"; exit 1; }
@@ -83,7 +102,75 @@ done
 # /proc/PID/cmdline still shows "usb_monitor.sh".
 is_running() { pid_running "$PIDFILE" "usb_monitor.sh"; }
 
+# LOCKDIR/acquire_lock/release_lock - BUG FOUND AND FIXED (CRITICAL - a real
+# TOCTOU race, verified with a standalone repro before touching this file:
+# 8 racers hitting the old bare "if is_running; then die; fi ... echo $! >
+# PIDFILE" pattern concurrently produced 2 distinct processes that both
+# believed they'd started successfully - the loser's PID-file write clobbers
+# the winner's, leaving the winner's run_monitor loop alive but permanently
+# UNTRACKED (no future --stop can ever find it again, and it keeps
+# notifying/appending to $LOGFILE - doubled - until the device reboots).
+# This isn't hypothetical for this exact script: setup.py restarts
+# usb_monitor.sh whenever its content changed since the last deploy (see
+# setup.py's usb_monitor_changed check - exactly what an active dev/bug-hunt
+# session does repeatedly), and reset.sh's ensure_usb_monitor() independently
+# restarts it whenever --status doesn't report Running for any reason - two
+# entirely separate processes (a deploy from a dev machine over SSH, and
+# reset.sh run directly on the device) that can genuinely both decide "it's
+# not running, start it" in the same instant, e.g. right after a crash.
+# Fixed with a plain mkdir-based lock (mkdir is atomic per POSIX, and unlike
+# `flock` it needs nothing extra installed - flock isn't guaranteed present
+# on this device's busybox build) serializing --background/--stop/--status
+# against each other. Re-verified with the same repro: 8 racers against the
+# locked version produced exactly 1 winner, every run.
+#
+# This one lock also closes two smaller variants of the same class found
+# during this pass rather than needing a separate patch each: --stop used to
+# re-read $PIDFILE a second time (once inside is_running's own check, again
+# for the `kill` itself) - a --background racing in between those two reads
+# could make --stop act on a DIFFERENT process than the one is_running just
+# validated; --status had the same second read purely for its printed
+# message, so it could show a stale/wrong PID during the same window.
+# Serializing all three on one lock removes all three at once.
+#
+# Stale-lock recovery: the lock is only ever held for the few fast, local,
+# non-blocking operations inside these three blocks - never across
+# run_monitor's own long-running loop - so the only way it outlives its
+# holder is that holder getting SIGKILLed in that narrow window. A waiter
+# that finds the lock held checks whether the PID that created it
+# ($LOCKDIR/pid) is still alive - same "does the recorded PID still actually
+# belong to something" check as pid_running() above - and clears the lock
+# itself if not, so a rare dead holder can't wedge every future
+# --background/--stop/--status behind a lock nobody will ever release.
+# Verified with a second standalone repro, including a bug this repro caught
+# in an earlier draft: `rmdir` fails on a non-empty directory, so the pid
+# marker file MUST be removed before the rmdir, not after - an earlier
+# version of this fix removed only the directory and looped forever
+# re-detecting the same "dead holder" without ever clearing it. Also
+# confirmed a genuinely live holder is never mistaken for stale, and a
+# waiter that can't get the lock within the timeout fails cleanly (a clear
+# die() message naming $LOCKDIR) instead of hanging indefinitely.
+LOCKDIR="/tmp/pager-usbmon.lock"
+acquire_lock() {
+    local tries=0 holder
+    while ! mkdir "$LOCKDIR" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 30 ] && die "Timed out waiting for another usb_monitor.sh --background/--stop/--status to finish (lock: $LOCKDIR)."
+        holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+        if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+            rm -f "$LOCKDIR/pid" 2>/dev/null
+            rmdir "$LOCKDIR" 2>/dev/null
+            continue
+        fi
+        sleep 0.1
+    done
+    echo $$ > "$LOCKDIR/pid" 2>/dev/null
+}
+release_lock() { rm -f "$LOCKDIR/pid" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+
 if [ "$DO_STATUS" = "1" ]; then
+    acquire_lock
+    trap release_lock EXIT
     if is_running; then
         say "Running (PID $(cat "$PIDFILE"))."
     else
@@ -93,6 +180,8 @@ if [ "$DO_STATUS" = "1" ]; then
 fi
 
 if [ "$DO_STOP" = "1" ]; then
+    acquire_lock
+    trap release_lock EXIT
     if is_running; then
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
@@ -138,9 +227,31 @@ trap _on_stop INT TERM
 # a frequent ambient notification. ALERT is still the right choice
 # elsewhere in this toolkit for genuinely one-off, attention-worthy
 # events (an attack finishing, a scan completing) - just not for this.
+#
+# BUG FOUND AND FIXED (bug-hunt pass, long-running-daemon robustness):
+# the LOG call had no timeout, unlike every other external/IPC-touching
+# call this toolkit makes (ip_link()/is_wifi_connected()/connected_bssid()
+# in lib/common.sh, tcpdump in sniff.sh - all wrapped in `timeout` because
+# this device has a documented, live-reproduced history of exactly this
+# class of call wedging). LOG is a hak5cmd binary that talks to the
+# device's own UI/log-view service - the same kind of userspace IPC call
+# that's already proven capable of wedging elsewhere on this hardware.
+# Verified live with a standalone repro (a foreground external command
+# simulating a hang, SIGTERM sent to the parent 1s in): bash defers
+# running any trap until the CURRENT foreground command completes - so if
+# LOG ever hung, notify() would block run_monitor's whole loop
+# indefinitely, and --stop's `kill "$PID"` would sit there having no
+# effect at all (STOPPING never gets set, the loop never gets back to
+# checking it) until something else killed the wedged LOG call - for a
+# script meant to run unattended for days/weeks, an unkillable-except-via-
+# kill/-9 daemon with --stop silently lying that it worked is a real
+# problem. Bounding it with the same `timeout` pattern this codebase
+# already trusts turns "however long LOG happens to hang for" into a
+# small, bounded worst-case delay before --stop's signal actually takes
+# effect, same as everywhere else this class of risk is already guarded.
 notify() {
     say "$1"
-    command -v LOG >/dev/null 2>&1 && LOG "$1" >/dev/null 2>&1
+    command -v LOG >/dev/null 2>&1 && timeout 5 LOG "$1" >/dev/null 2>&1
 }
 
 # get_internal_radio_usb_path - THE ACTUAL ROOT CAUSE of "USB-A never
@@ -257,16 +368,79 @@ run_monitor() {
     say "Watching USB-C/USB-A for attach/detach - Ctrl+C to stop."
     local internal_radio_path
     internal_radio_path=$(get_internal_radio_usb_path)
-    # Baseline dmesg line count - only lines APPENDED after this point
-    # count as "new" (matches the same count-diff pattern already proven
-    # in sniff.sh's live watchers). Deliberately never clears/consumes
-    # the kernel log buffer (no `dmesg -c`) - something else on the
-    # device (klogd/syslog) may also be reading it, and destructively
-    # clearing it could steal messages meant for that.
-    local dmesg_seen
-    dmesg_seen=$(dmesg 2>/dev/null | wc -l)
+    # IMPROVEMENT (defensive, startup-race): the above is normally resolved
+    # once and trusted for this process's entire run (which can be days -
+    # see run_monitor's own header). It depends on /sys/class/net/wlan1mon
+    # already existing at the moment usb_monitor.sh starts - true in every
+    # live test this session, but not guaranteed: --background can be
+    # launched very early (e.g. by an init/startup path, or a fast setup.py/
+    # reset.sh restart cycle) before the internal radio's own interface has
+    # come up yet. describe_usb_device() above already treats sysfs
+    # enumeration timing as something worth retrying for exactly this
+    # reason (see its own comment) - this call site never got the same
+    # treatment. If it fails to resolve here, internal_radio_path stays ""
+    # for the rest of THIS run with nothing to ever revisit it, meaning
+    # every subsequent internal-radio reinit for that whole run would be
+    # misidentified as an external USB-A device (the original bug this
+    # whole exclusion exists to prevent - see get_internal_radio_usb_path's
+    # own header). Retrying a few times here (short, bounded, same shape as
+    # describe_usb_device's own retry) covers a slow-to-appear wlan1mon at
+    # startup cheaply; a periodic best-effort retry further down (only
+    # while still unresolved, never re-guessing a path already found) covers
+    # a wlan1mon that simply isn't there yet for longer than that.
+    if [ -z "$internal_radio_path" ]; then
+        local _radio_tries=0
+        while [ "$_radio_tries" -lt 5 ] && [ -z "$internal_radio_path" ]; do
+            sleep 0.5
+            internal_radio_path=$(get_internal_radio_usb_path)
+            _radio_tries=$((_radio_tries + 1))
+        done
+    fi
+    # Baseline dmesg content - only lines APPENDED after this point count as
+    # "new" (matches the same count-diff pattern already proven in sniff.sh's
+    # live watchers). Deliberately never clears/consumes the kernel log
+    # buffer (no `dmesg -c`) - something else on the device (klogd/syslog)
+    # may also be reading it, and destructively clearing it could steal
+    # messages meant for that.
+    #
+    # BUG FOUND AND FIXED (long-running-daemon pass, verified with a
+    # standalone repro): tracking progress via a LINE-COUNT diff (`dmesg |
+    # wc -l` growing over time, as this used to do) silently assumes the
+    # count only ever grows, or drops on a wrap - but a kernel ring buffer
+    # is a fixed-BYTE-size buffer, not a fixed-line-count one. Once it has
+    # actually filled up (unlikely to matter in one short test session,
+    # near-certain eventually on the days/weeks uptime this script is built
+    # for), each new kernel message evicts roughly one old one from the
+    # front to make room, so the TOTAL line count can plateau at a roughly
+    # constant value for the rest of the device's uptime even while
+    # genuinely new USB attach/disconnect lines keep landing at the end.
+    # Repro: simulated a 5-line ring buffer already at capacity, evicting
+    # the oldest and appending one new line per tick (half of them real
+    # "usb ... new high-speed USB device" lines) - the old `total -gt seen`
+    # / `total -lt seen` logic fired NEITHER branch on any tick (total
+    # stayed at 5 throughout): 4 real attach events injected, 0 detected,
+    # with --status still happily reporting "Running" the whole time and no
+    # indication detection had gone silently blind. Fixed by tracking the
+    # actual last-seen LINE (a content watermark) instead of a count:
+    # locate it by exact text match in the new dump and treat everything
+    # after it as "new" - this depends on whether the CONTENT changed, not
+    # whether the total count happens to, so a plateaued-but-turning-over
+    # buffer is detected correctly. If the watermark line itself has been
+    # evicted (a genuine wrap, or no watermark resolved yet), that's the
+    # same "can't find my place, re-scan the whole current buffer" fallback
+    # the old `-lt` branch used - at worst re-notifying about an event from
+    # just before the wrap once, same accepted tradeoff as before, just no
+    # longer blind to the far more likely plateau case. Trade-off: keeping
+    # $dmesg_prev around across iterations (instead of a plain integer)
+    # costs one extra copy of the dmesg buffer's content in memory - bounded
+    # by the same fixed kernel ring buffer size $dmesg_now was already
+    # bounded by, so no new unbounded-growth risk, just a small constant
+    # increase in this loop's own footprint.
+    local dmesg_prev dmesg_last_line
+    dmesg_prev=$(dmesg 2>/dev/null)
+    dmesg_last_line=$(printf '%s\n' "$dmesg_prev" | tail -n 1)
 
-    local prev_c="" prev_a_if="" prev_a_state=""
+    local prev_c="" prev_a_if="" prev_a_state="" prev_usb_a_pub="" _loop_iter=0
     while [ "$STOPPING" != "1" ]; do
         local c_state a_if a_state
         if iface_has_carrier eth0; then c_state="attached"; else c_state="detached"; fi
@@ -277,6 +451,47 @@ run_monitor() {
             a_state="detected-link-down"
         else
             a_state="none"
+        fi
+
+        # IMPROVEMENT (defensive, same startup-race as the one-shot retry
+        # above): if internal_radio_path never resolved at startup (e.g.
+        # wlan1mon genuinely wasn't there yet, longer than the bounded
+        # startup retry covered), keep giving it a cheap chance to resolve
+        # every ~60 iterations (~2 minutes at this loop's 2s cadence)
+        # instead of giving up on it silently for this process's entire
+        # remaining run (which can be days). Deliberately one-directional:
+        # only retried while still EMPTY - a path that already resolved
+        # successfully is never re-checked or second-guessed here, so a
+        # transient readlink hiccup later in a long run can't wrongly blank
+        # out a previously-good exclusion.
+        _loop_iter=$((_loop_iter + 1))
+        if [ -z "$internal_radio_path" ] && [ $((_loop_iter % 60)) -eq 0 ]; then
+            internal_radio_path=$(get_internal_radio_usb_path)
+        fi
+
+        # IMPROVEMENT (integration question - see USB_A_STATEFILE's own
+        # comment near the top of this file for the full judgment call):
+        # publish USB-A's interface-presence state (does detect_usb_a_iface
+        # currently find an interface at all - the same fact a consumer
+        # like sniff.sh's bridge watchdog cares about, since it also just
+        # checks `ip link show <iface>` existence, not carrier/link state)
+        # to a small file, but only on an actual transition - every other
+        # iteration this is a single cheap string comparison, nothing
+        # written. Atomic (write-to-temp then rename) so a concurrent
+        # reader can never observe a half-written file. Uses this process's
+        # own $$ for the temp name (unique per usb_monitor.sh instance,
+        # same convention as this file's own LOGFILE trim and lib/common.sh's
+        # topology_log()) - not a new race even if two instances somehow
+        # ran at once (already guarded against elsewhere; not re-litigated
+        # here). First iteration always counts as a "transition" (prev_usb_a_pub
+        # starts empty) specifically so a fresh reader gets a real baseline
+        # immediately instead of waiting for the first genuine plug/unplug.
+        local usb_a_pub
+        if [ -n "$a_if" ]; then usb_a_pub="attached"; else usb_a_pub="detached"; fi
+        if [ "$usb_a_pub" != "$prev_usb_a_pub" ]; then
+            printf '%s\n' "$usb_a_pub" >"${USB_A_STATEFILE}.tmp.$$" 2>/dev/null && mv -f "${USB_A_STATEFILE}.tmp.$$" "$USB_A_STATEFILE" 2>/dev/null
+            rm -f "${USB_A_STATEFILE}.tmp.$$" 2>/dev/null
+            prev_usb_a_pub="$usb_a_pub"
         fi
 
         if [ -n "$prev_c" ] && [ "$c_state" != "$prev_c" ]; then
@@ -309,42 +524,43 @@ run_monitor() {
         # this device reads straight from the kernel ring buffer - a fork+
         # exec+kernel-read that's pure waste to pay twice for the same
         # snapshot when it's trivial to capture the buffer ONCE into a
-        # variable and derive both the count and the tail from that same
-        # string. Verified equivalent with a standalone repro (fake dmesg()
-        # with a call counter): identical output, dmesg invocations per
-        # "new lines" iteration dropped from 2 to 1. The no-change path
+        # variable. Verified equivalent with a standalone repro (fake
+        # dmesg() with a call counter): identical output, dmesg invocations
+        # per "new lines" iteration dropped from 2 to 1. The no-change path
         # (the common case, most iterations) was already just 1 call and
-        # stays that way.
-        local dmesg_now dmesg_total
+        # stays that way. (The "line count" half of the original wording
+        # here is now stale - see below: this later moved from a count diff
+        # to a content-watermark diff. The single-dmesg-call-per-iteration
+        # property this paragraph documents is still exactly what happens.)
+        # Content-watermark based change detection - see the baseline
+        # comment above (where $dmesg_prev/$dmesg_last_line are first set)
+        # for why this replaced a plain line-count diff. `dmesg_now !=
+        # dmesg_prev` is a cheap whole-string comparison, no more expensive
+        # than the `wc -l`/`grep -c .` this used to compute every cycle -
+        # the no-change path (the common case, most iterations) still costs
+        # exactly one `dmesg` call and one comparison, nothing more.
+        local dmesg_now
         dmesg_now=$(dmesg 2>/dev/null)
-        dmesg_total=$(printf '%s\n' "$dmesg_now" | wc -l)
         local _usb_grep='^\[.*\] usb [0-9]+-[0-9.]+: (new .* USB device|USB disconnect)'
-        if [ "$dmesg_total" -gt "$dmesg_seen" ] 2>/dev/null; then
-            printf '%s\n' "$dmesg_now" | tail -n "+$((dmesg_seen + 1))" | grep -E "$_usb_grep" | process_usb_dmesg_lines
-            dmesg_seen="$dmesg_total"
-        elif [ "$dmesg_total" -lt "$dmesg_seen" ] 2>/dev/null; then
-            # BUG FOUND AND FIXED (same class as crash_logger.sh's own
-            # fix, arguably even more likely to bite here - this is
-            # designed to run continuously for as long as the device is
-            # up, not just for one testing session): the kernel ring
-            # buffer has a fixed capacity - once full, old lines get
-            # evicted from the front as new ones arrive, so `dmesg | wc
-            # -l` can drop (or plateau) even though genuinely new bus
-            # events keep arriving. The original `total -gt seen`-only
-            # check would go permanently blind to new USB attach/detach
-            # events the first time this happens on a long-running
-            # watcher, with --status still happily reporting "Running"
-            # and no indication attach/detach detection had silently
-            # stopped working (the separate eth0/USB-A-Ethernet carrier
-            # checks above are unaffected - only this generic bus-event
-            # path depends on dmesg). A drop is an unambiguous wrap
-            # signal: re-scan the WHOLE current buffer for attach/
-            # disconnect lines instead of assuming nothing changed - at
-            # worst this re-notifies about a device event from just
-            # before the wrap once, which is a far better failure mode
-            # than going silent for the rest of the run.
-            printf '%s\n' "$dmesg_now" | grep -E "$_usb_grep" | process_usb_dmesg_lines
-            dmesg_seen="$dmesg_total"
+        if [ "$dmesg_now" != "$dmesg_prev" ]; then
+            local _wm_line=""
+            if [ -n "$dmesg_last_line" ]; then
+                _wm_line=$(printf '%s\n' "$dmesg_now" | grep -F -x -n -- "$dmesg_last_line" 2>/dev/null | tail -1 | cut -d: -f1)
+            fi
+            if [ -n "$_wm_line" ]; then
+                # Watermark found - only the genuinely new tail after it
+                # needs scanning, same incremental cost as the old -gt path.
+                printf '%s\n' "$dmesg_now" | tail -n "+$((_wm_line + 1))" | grep -E "$_usb_grep" | process_usb_dmesg_lines
+            else
+                # Watermark not found (wrap/rotation, or nothing resolved
+                # yet) - can't tell where "new" starts, so re-scan the whole
+                # current buffer instead of assuming nothing changed. At
+                # worst this re-notifies about an event from just before the
+                # wrap once, same accepted tradeoff the old -lt branch used.
+                printf '%s\n' "$dmesg_now" | grep -E "$_usb_grep" | process_usb_dmesg_lines
+            fi
+            dmesg_prev="$dmesg_now"
+            dmesg_last_line=$(printf '%s\n' "$dmesg_now" | tail -n 1)
         fi
 
         prev_c="$c_state"; prev_a_if="$a_if"; prev_a_state="$a_state"
@@ -389,6 +605,8 @@ run_monitor() {
 # instead of the replacement file - safe to do here, before the fd for
 # THIS run is ever opened, not safe to repeat once it is.
 if [ "$BACKGROUND" = "1" ]; then
+    acquire_lock
+    trap release_lock EXIT
     if is_running; then die "Already running (PID $(cat "$PIDFILE")). Use --stop first."; fi
     if [ -f "$LOGFILE" ]; then
         _usbmon_log_lines=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
@@ -397,8 +615,24 @@ if [ "$BACKGROUND" = "1" ]; then
             rm -f "${LOGFILE}.tmp.$$" 2>/dev/null
         fi
     fi
-    ( trap '' HUP; run_monitor ) >>"$LOGFILE" 2>&1 &
+    # `trap - EXIT` INSIDE these parens is not optional - BUG FOUND AND
+    # FIXED during this same pass (caught before it ever shipped, by
+    # tracing what a forked child inherits rather than by a live symptom):
+    # the child forked by the trailing `&` below inherits the parent's
+    # traps at fork time, including the "trap release_lock EXIT" just set
+    # two lines up. Without clearing it here, the child would ALSO run
+    # release_lock whenever IT eventually exits - which for a daemon
+    # meant to run for days is arbitrarily far in the future, e.g. whenever
+    # --stop finally reaches it - and by then $LOCKDIR could easily belong
+    # to a completely unrelated, currently in-progress --background/--stop/
+    # --status call, which the child's stale trap would then rmdir out from
+    # under it. The parent already releases the lock itself, immediately
+    # below, right after the fork - the lock was only ever meant to guard
+    # this launch sequence, not run_monitor's entire lifetime.
+    ( trap '' HUP; trap - EXIT; run_monitor ) >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
+    release_lock
+    trap - EXIT
     say "Started (PID $(cat "$PIDFILE")). Log: $LOGFILE"
     exit 0
 fi

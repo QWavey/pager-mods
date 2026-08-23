@@ -187,6 +187,63 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# BUG FOUND AND FIXED (CRITICAL, found via code review - matches this
+# review's own requested scenario, "--summary given alongside --bridge"):
+# every one of this script's mode-selecting flags (--summary, --list,
+# --adapters, --status, --stop, --unbridge, --bridge) is independently
+# checked further down, each in its own `if [ "$DO_X" = "1" ]; then ...;
+# exit 0; fi` block, in a fixed order. Nothing here ever verified only ONE
+# was actually given - `sniff.sh --bridge eth0 eth1 --summary old.pcap`
+# parses BOTH DO_BRIDGE=1 and SUMMARY_FLAG_GIVEN=1 without complaint, then
+# execution falls into the FIRST matching `if` in file order (--summary's
+# check comes first) and exits right there - the --bridge request the
+# caller also explicitly typed is silently thrown away with zero
+# indication it was ever seen, let alone ignored. Every other pairing of
+# these flags has the identical silent-priority problem (`--list --stop`
+# only ever lists; `--adapters --unbridge` only ever checks adapters),
+# just less surprising than the bridge/summary case this task named
+# directly. Rejecting more than one at parse time - loud and immediate,
+# this toolkit's standard convention for a bad combination - beats
+# silently honoring whichever check happens to run first.
+_mode_count=0; _mode_names=""
+for _mode_flag in "$SUMMARY_FLAG_GIVEN:--summary" "$DO_LIST:--list" "$DO_ADAPTERS:--adapters" "$DO_STATUS:--status" "$DO_STOP:--stop" "$DO_UNBRIDGE:--unbridge" "$DO_BRIDGE:--bridge"; do
+    case "$_mode_flag" in
+        1:*)
+            _mode_count=$((_mode_count + 1))
+            _mode_names="${_mode_names:+$_mode_names, }${_mode_flag#1:}"
+            ;;
+    esac
+done
+[ "$_mode_count" -gt 1 ] && die "These flags select different, conflicting actions and can't be combined: $_mode_names. Run sniff.sh once per action (e.g. finish or cancel the bridge first, then re-run with --summary)."
+
+# BUG FOUND AND FIXED (found via code review): --dhcp only ever does
+# anything inside the `if [ "$DO_BRIDGE" = "1" ]` block far below (it
+# requests a DHCP lease ON the bridge device --bridge just created) - the
+# header above even documents it as "With --bridge: ...". Given without
+# --bridge (e.g. a plain `sniff.sh --iface eth1 --dhcp`, or `--dhcp` typed
+# alongside --status/--list/etc.), BRIDGE_DHCP is still set to 1 by the
+# parser above but nothing downstream ever checks it outside that one
+# block - the flag is silently accepted and silently does nothing, with no
+# hint to the caller that what they asked for never happened. Same "loud
+# beats silent" convention as the mode-conflict check just above.
+[ "$BRIDGE_DHCP" = "1" ] && [ "$DO_BRIDGE" != "1" ] && die "--dhcp only makes sense together with --bridge (it requests a DHCP lease on the bridge device --bridge creates). Did you mean: sniff.sh --bridge IFACE1 IFACE2 --dhcp"
+
+# BUG FOUND AND FIXED (found via code review): --bridge's own arg-count
+# check (right above, in the parser) only ever verified TWO interface
+# names were given, never that they're actually two DIFFERENT interfaces.
+# `sniff.sh --bridge eth1 eth1` passes that check, then passes the
+# existence check further down too (the same real interface, checked
+# twice) - the script goes on to create br-sniff and enslave eth1 to it,
+# then try to enslave eth1 to it AGAIN (a harmless no-op the second time),
+# ending up with a "bridge" that has exactly one port, not the two-NIC
+# transparent tap this whole feature exists to build. Nothing about that
+# resembles a working tap and nothing said so - it would just silently
+# "succeed" with a single-legged bridge that passes no traffic through at
+# all. Reject the degenerate case explicitly instead.
+if [ "$DO_BRIDGE" = "1" ] && [ "$BR_IFACE1" = "$BR_IFACE2" ]; then
+    die "--bridge needs two DIFFERENT interface names (got '$BR_IFACE1' twice) - bridging an interface to itself isn't a two-NIC tap."
+fi
+
 # BUG FOUND AND FIXED (found via code review): --duration and --count were
 # the two numeric CLI arguments in this whole toolkit with NO validation at
 # all - every other numeric flag elsewhere (deauth.sh's --channel/
@@ -224,12 +281,81 @@ done
 [ "$DURATION" = "0" ] && die "'--duration' can't be 0 - tcpdump/timeout treat 0 as 'no limit', not 'stop immediately', so this would start an unbounded capture instead. Use a real duration (e.g. 1) or --count 1 if you just want a single packet."
 [ "$COUNT" = "0" ] && die "'--count' can't be 0 - tcpdump treats a count of 0 as 'unlimited', not 'capture nothing', so this would start an unbounded capture instead. Use a real packet count."
 
+# BUG FOUND AND FIXED (found via code review - the digit-only check above
+# rejects anything non-numeric or negative, but never bounds how MANY
+# digits): an absurdly long, all-digit value (a fat-fingered extra zero or
+# two, or a paste gone wrong) still passes it as "a valid whole number."
+# Two separate, real downstream risks from that, reasoned from documented
+# behavior rather than confirmed against this exact device's own tcpdump
+# build (no live device available to this pass, same honesty standard as
+# the CAP_RC reasoning further down this file): (1) --count is handed to
+# tcpdump's own `-c` option, which C's atoi()/strtol() family parses into a
+# fixed-width integer - on a 64-bit userspace where `long` is wider than
+# `int` (e.g. aarch64/x86_64 Linux), a value that overflows `long` clamps
+# to LONG_MAX on standards-conforming libc, but atoi()'s further
+# (int)-narrowing cast of THAT clamped value is implementation-defined and
+# commonly truncates to the low 32 bits - for LONG_MAX specifically, that's
+# 0xFFFFFFFF, i.e. -1, and this file's own header above already documents
+# libpcap treating "-1 or 0 for cnt is equivalent to infinity." A --count
+# meant to bound a capture could silently become the exact unbounded
+# capture the 0-rejection fix above exists to prevent, just reached via a
+# huge number instead of a small one. (2) Independent of that platform-
+# specific risk, a --duration/--count in the billions/trillions is never a
+# real, intended value for a packet capture on this device regardless of
+# how any particular libc happens to parse it - it's always either a typo
+# or a bad input, and letting it through to `timeout`/tcpdump to fail (or
+# not fail) however they see fit forfeits the same immediate, specific
+# error this toolkit's whole numeric-validation convention exists to give.
+# Bounding both to a still-extremely-generous but finite ceiling - 30 days
+# of seconds, 100 million packets (each comfortably clear of any 32-bit
+# signed-int boundary, so the bound itself can never become part of the
+# same overflow problem it's guarding against) - catches every realistic
+# typo while never constraining an actual real-world capture on this
+# hardware, which this file's own MAX_LIVE_WATCH_BYTES/MAX_BRIDGE_SECS
+# comments already establish is meant for short diagnostic sessions, not
+# multi-week unattended runs.
+# BUG FOUND AND FIXED (re-auditing the bound check just below, before it
+# ever shipped - verified with a standalone `bash -c` repro): a bare
+# `[ "$DURATION" -gt 2592000 ]` on a value long enough to overflow bash's
+# OWN 64-bit arithmetic doesn't cleanly evaluate false/true - confirmed
+# standalone that `[ "99999999999999999999999999" -gt 100 ]` errors out
+# with "integer expression expected" and returns exit status 2, which the
+# surrounding `&&` chain treats as "condition not met" and moves on
+# WITHOUT calling die - so the single most extreme case this bound exists
+# to catch (a wildly-overflowing paste) is exactly the case the naive
+# version of this check would have silently let through. A cheap length
+# check first (more digits than any real value could ever need, and far
+# short of where bash's own comparison could overflow) catches that case
+# before the numeric comparison ever runs on it.
+if [ -n "$DURATION" ] && [ "${#DURATION}" -gt 15 ]; then
+    die "'--duration' ('$DURATION', ${#DURATION} digits) is not a realistic number of seconds - looks like a typo or a bad paste, not an intended capture length."
+fi
+if [ -n "$COUNT" ] && [ "${#COUNT}" -gt 15 ]; then
+    die "'--count' ('$COUNT', ${#COUNT} digits) is not a realistic packet count - looks like a typo or a bad paste, not an intended count."
+fi
+[ -n "$DURATION" ] && [ "$DURATION" -gt 2592000 ] && die "'--duration' of ${DURATION}s (over 30 days) looks like a typo, not an intended capture length - use a smaller value, or omit --duration and --stop it manually if you really do need an open-ended capture."
+[ -n "$COUNT" ] && [ "$COUNT" -gt 100000000 ] && die "'--count' of $COUNT packets (over 100 million) looks like a typo, not an intended packet count - this device doesn't have the disk/RAM for a capture that large. Use a smaller value."
+
 # Shared by summarize_pcap (end-of-capture scan) AND run_creds_watcher
 # (live, DURING-capture scan) - one definition so the two can't drift.
 # Covers HTTP Basic Auth, query-string logins, raw FTP/Telnet USER/PASS,
 # JSON request-body password fields, and Authorization: Bearer tokens (a
 # captured one is session hijacking, just as real a finding as a password).
 CREDS_PATTERN='authorization: basic|authorization: bearer|(^|[?&])(pass|passwd|pwd|user|login|email)=|^USER |^PASS |"(pass|passwd|pwd|password)"[[:space:]]*:'
+
+# MAX_SUMMARY_SCAN_BYTES - hard ceiling on how much of a saved capture
+# summarize_pcap will fully -A/-nn decode into in-memory bash variables in
+# one pass (see the BUG FOUND AND FIXED comment inside summarize_pcap
+# itself for the full reasoning - this exists because the 90s timeout on
+# those two tcpdump calls bounds time, not the memory needed to hold their
+# output). 25MB raw pcap, even at tcpdump -A's documented multi-times ASCII
+# expansion, keeps NN_DUMP+A_DUMP together in the tens-of-MB range - a real
+# cost on a 251MB device, but nowhere near the hundreds-of-MB-to-GB range a
+# genuinely large, hours-long background capture could otherwise produce.
+# Deliberately well above MAX_LIVE_WATCH_BYTES (4MB): this is a one-time
+# cost (not re-run every 5s), so it can afford to cover a much larger
+# capture before falling back to a bounded snapshot.
+MAX_SUMMARY_SCAN_BYTES=26214400
 
 summarize_pcap() {
     local file="$1"
@@ -264,12 +390,71 @@ summarize_pcap() {
     # winding down (when the main tcpdump process and any still-exiting
     # watcher/feed subshells are all still holding their own memory).
     # 90s is generous (this runs once, not every 5s) but still finite.
+    #
+    # BUG FOUND AND FIXED (CRITICAL - this is the same "crashed the device"
+    # incident the 90s timeout above was already added for, but the timeout
+    # only bounds TIME, not memory, and re-checking the actual mechanics
+    # shows it doesn't close the real hole). NN_DUMP and A_DUMP are plain
+    # bash command-substitution variables - the ENTIRE decoded text has to
+    # be materialized as one contiguous in-process buffer before a single
+    # byte of it can be used, and BOTH stay resident simultaneously (A_DUMP
+    # is computed while NN_DUMP is still in scope, and neither is unset
+    # until the function returns). tcpdump -A's ASCII expansion is already
+    # documented elsewhere in this file as "typically several times LARGER"
+    # than the binary pcap it's decoding. summarize_pcap is deliberately
+    # NOT capped by MAX_LIVE_WATCH_BYTES (see that constant's own comment -
+    # "a full pass is still worth attempting even for a large file"), which
+    # is the right call for a --duration-less background capture ("until
+    # stopped", the exact scenario that produced the original crash
+    # report) - but at this session's own measured growth rate (~10.5MB in
+    # 20s on a busy capture, ~0.5MB/s), even a modest 20-30 minute
+    # unattended background run reaches several hundred MB on disk, and
+    # decoding THAT into two simultaneous multi-hundred-MB-to-GB-scale bash
+    # strings on a 251MB-RAM device is a near-certain OOM - plausibly the
+    # ACTUAL mechanism behind the original incident, not just a slow-pass
+    # symptom the 90s bound happens to catch in time (90s is easily enough
+    # wall-clock budget to emit far more output than this device has RAM
+    # for, long before the deadline would ever fire). Added a separate,
+    # genuinely protective hard byte ceiling (distinct from the 20MB
+    # "please wait" notice above, which only warns - it doesn't limit
+    # anything): past MAX_SUMMARY_SCAN_BYTES, decode a byte-bounded
+    # snapshot of the file (same `head -c` technique used for the
+    # MAX_LIVE_WATCH_BYTES race fix in run_creds_watcher/run_packet_feed
+    # below) instead of the full file, with a clear, honest notice - same
+    # "don't silently truncate without saying so" convention as every other
+    # cap in this file. The saved .pcap itself is never touched.
     size=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
-    if [ "${size:-0}" -gt 20971520 ] 2>/dev/null; then
+    local scan_file="$file" scan_note=""
+    # Only show the "may take a while" notice when we're actually about to
+    # decode the full file - once MAX_SUMMARY_SCAN_BYTES kicks in below, the
+    # decode is bounded to that size regardless of how much larger the real
+    # file is, so warning about a full-file cost that isn't going to happen
+    # would just be confusing alongside the truncation notice.
+    if [ "${size:-0}" -gt 20971520 ] 2>/dev/null && [ "${size:-0}" -le "$MAX_SUMMARY_SCAN_BYTES" ] 2>/dev/null; then
         say "Capture is $((size / 1024 / 1024))MB - summarizing may take a while and use real memory on this device, please wait..."
     fi
-    NN_DUMP=$(timeout 90 tcpdump -nn -r "$file" 2>/dev/null); local nn_rc=$?
-    A_DUMP=$(timeout 90 tcpdump -A -r "$file" 2>/dev/null); local a_rc=$?
+    if [ "${size:-0}" -gt "$MAX_SUMMARY_SCAN_BYTES" ] 2>/dev/null; then
+        scan_file="/tmp/pager-sniff-summary-snap.$$"
+        head -c "$MAX_SUMMARY_SCAN_BYTES" "$file" > "$scan_file" 2>/dev/null
+        # Defensive fallback (this `head -c` is new, unlike this file's
+        # existing `head -N` line-count usages elsewhere - if this device's
+        # head build somehow doesn't support -c, don't let the safety fix
+        # itself silently turn into an empty/broken summary): only trust
+        # the snapshot if it actually produced real bytes, otherwise fall
+        # back to the full file - the original, still-timeout-bounded
+        # behavior - rather than decode nothing.
+        if [ -s "$scan_file" ]; then
+            scan_note="This capture is $((size / 1024 / 1024))MB - only the first $((MAX_SUMMARY_SCAN_BYTES / 1024 / 1024))MB was decoded for this summary (decoding the whole thing risks exhausting this device's RAM). The saved .pcap itself is complete and untouched; review it directly (e.g. download and open in Wireshark) for the full picture."
+            err "$scan_note"
+        else
+            rm -f "$scan_file"
+            scan_file="$file"
+            err "Couldn't create a bounded snapshot of this $((size / 1024 / 1024))MB capture (head -c may be unsupported on this device) - falling back to a full-file decode; this may be slow and use significant memory."
+        fi
+    fi
+    NN_DUMP=$(timeout 90 tcpdump -nn -r "$scan_file" 2>/dev/null); local nn_rc=$?
+    A_DUMP=$(timeout 90 tcpdump -A -r "$scan_file" 2>/dev/null); local a_rc=$?
+    [ "$scan_file" != "$file" ] && rm -f "$scan_file"
     # BUG FOUND AND FIXED (same silent-truncation class as run_creds_
     # watcher's own fix, applied here too - this is the FINAL, most-relied-
     # on report for a whole capture, so a quietly incomplete one is worse
@@ -343,9 +528,33 @@ summarize_pcap() {
     # or "DNS" - it shows "Flags [S]" for TCP and query markers like "A?"
     # for DNS instead. Classify by those actual markers (verified against
     # real tcpdump output samples), not by literal protocol-name grepping.
+    # BUG FOUND AND FIXED (verified with a standalone awk test against a
+    # real tcpdump line format, not assumed): an STP (Spanning Tree
+    # Protocol, 802.1d) BPDU - real, documented tcpdump output looks like
+    # "STP 802.1d, Config, Flags [none], bridge-id 8000.<mac>.8003, length
+    # 43" (confirmed against tcpdump's own test fixtures/real capture
+    # reports) - was silently miscounted as "TCP" here, because the SAME
+    # `/Flags \[/` pattern meant to catch TCP's "Flags [S]"/"Flags [P.]"
+    # also matches STP's unrelated "Flags [none]" field, and the TCP rule
+    # ran before anything STP-specific could catch it first. Reproduced
+    # standalone: feeding a synthetic NN_DUMP containing one real STP BPDU
+    # line plus one real TCP SYN line through this exact awk script
+    # classified BOTH as "TCP" (2 total), not 1 TCP + 1 STP. Directly
+    # reachable in this tool's own primary use case, not just theoretical:
+    # --bridge builds a real transparent Ethernet tap (br-sniff) between
+    # two NICs specifically so traffic actually flows through it, and any
+    # switch on either side of that tap sending periodic STP BPDUs (a very
+    # ordinary, common thing switches do) would show up captured on
+    # br-sniff/eth1 and get folded into the TCP count, corrupting the one
+    # summary this tool exists to give an accurate, immediate report from.
+    # Added a dedicated STP rule (matched the same "timestamp then keyword"
+    # structural style already used by the OTHER-IP rule below) ahead of
+    # the Flags-based TCP rule, so a real STP frame is classified correctly
+    # and no longer inflates the TCP bucket.
     echo "$NN_DUMP" | awk '
         /ARP,/ { print "ARP"; next }
         /ICMP/ { print "ICMP"; next }
+        /^[0-9:.]+ STP / { print "STP"; next }
         /Flags \[/ { print "TCP"; next }
         /[0-9]+\+? (A|AAAA|PTR|MX|TXT|CNAME|NS)\?/ { print "DNS"; next }
         /: UDP,/ { print "UDP"; next }
@@ -420,8 +629,41 @@ HTTP_PATTERN='^(GET|POST|PUT|DELETE|HEAD) /|^host: '
 # though blocks_lines itself can have thousands of entries (one per
 # packet).
 watcher_block_bounds() {
+    # BUG FOUND AND FIXED (verified with a standalone awk+sed test, not just
+    # read-through): `bs` was only ever assigned inside the `$1 <= ln`
+    # branch, with no BEGIN default - if LINENO falls before every entry in
+    # blocks_lines (or blocks_lines is empty/malformed - exactly the
+    # "truncated tcpdump -A output" case this was asked to be checked
+    # against), that branch never runs and `bs` stays the empty string.
+    # Confirmed live via a standalone test: with bs="", the caller's
+    # `sed -n "${bs}p" "$dumpfile"` silently becomes `sed -n "p"` (no
+    # address at all) - NOT an error, it prints the ENTIRE dumpfile instead
+    # of just the intended line, so watcher_tag_hit() would resolve the
+    # source IP from whatever the FIRST " > " line in the whole dump
+    # happens to be rather than the actual hit's own enclosing packet -
+    # a real misattribution, not a crash. The companion host-range call
+    # (`sed -n "${bs},$((be-1))p"`) becomes a leading-comma range with no
+    # start address, which is a genuine sed syntax error ("unknown command
+    # `,'") - harmlessly swallowed today since callers don't check sed's
+    # exit code (host just falls back to "?"), but still wrong.
+    # A naive `BEGIN { bs = 1 }` default alone was NOT enough - verified
+    # that still failed for a genuinely empty blocks_lines: the here-string
+    # `<<<""` feeds awk exactly one blank record, and the old unconditional
+    # `{ if ($1 <= ln) bs = $1 }` treats a blank $1 as numeric 0, which is
+    # always <= ln, so it overwrote the BEGIN default right back to "".
+    # Guarding both branches on `NF` (skip blank/fieldless records
+    # entirely) closes that too - verified against all 5 cases (mid-range,
+    # past-the-end, empty blocks_lines, ln-before-first-entry, ln exactly
+    # on a header) with a standalone script before applying here. In real
+    # operation this path is normally unreachable (tcpdump's block-buffered
+    # stdout means a killed/truncated re-scan either has a complete first
+    # header line or is empty - caught by the caller's own `[ -s "$dumpf" ]`
+    # check before this is ever called), but the fix is free and removes a
+    # real (if narrow) misattribution vector rather than leaving it latent.
     awk -v ln="$1" '
-        { if ($1 <= ln) { bs = $1 } else if (!be) { be = $1 } }
+        BEGIN { bs = 1 }
+        NF && $1 <= ln { bs = $1 }
+        NF && $1 > ln && !be { be = $1 }
         END { if (!be) be = 2000000000; print bs "\t" be }
     ' <<<"$blocks_lines"
 }
@@ -587,8 +829,42 @@ run_creds_watcher() {
             return 0
         fi
 
+        # BUG FOUND AND FIXED (check-then-act race, verified against this
+        # session's own measured capture rate): the size cap just above is
+        # only checked at a single instant (cur_size at time of `wc -c`),
+        # but `tcpdump -r FILE` opens the REAL, still-growing capture file
+        # directly and reads via plain read() calls that see whatever bytes
+        # are on disk at each call - it does not snapshot the file at open
+        # time, so it keeps picking up newly-appended packets for as long
+        # as it keeps reading, up to its own 15s timeout. At this session's
+        # own measured busy-capture rate (~10.5MB/20s = ~0.52MB/s), a single
+        # cycle that starts its 15s-bounded read right after a passing
+        # cur_size check could still absorb up to ~7.9MB of NEW growth
+        # DURING that same read - on top of the up-to-4MB already checked -
+        # before the NEXT cycle's check ever catches it. Not the original
+        # "unbounded, crashes the device" failure (still hard-capped by the
+        # 15s timeout either way), but a real, measurable gap between the
+        # cap's intent ("never process much more than 4MB per cycle") and
+        # what could actually happen in the one cycle that crosses the
+        # line. Snapshotting exactly `cur_size` bytes (the amount already
+        # confirmed safe) into a static temp file BEFORE handing it to
+        # tcpdump closes this: tcpdump then reads a file that cannot grow
+        # further underneath it, no matter how long its own decode takes.
+        # Deliberately a plain temp file (not a `head -c | tcpdump -r -`
+        # pipeline) - a multi-process pipeline here would reintroduce the
+        # exact orphaned-child risk this file has already found and fixed
+        # twice elsewhere (see run_packet_feed's own header comment).
+        local snapf="/tmp/pager-sniff-watcher-snap.$$" read_target
+        head -c "$cur_size" "$file" > "$snapf" 2>/dev/null
+        # Defensive fallback: if `head -c` didn't produce real bytes (e.g.
+        # unsupported on this device's head build), fall back to reading
+        # $file directly rather than silently scanning nothing every cycle
+        # - re-exposes the race this fix closes, but only as a fallback,
+        # never as a silent no-op.
+        if [ -s "$snapf" ]; then read_target="$snapf"; else read_target="$file"; fi
         local dumpf="/tmp/pager-sniff-watcher-dump.$$"
-        timeout 15 tcpdump -A -r "$file" 2>/dev/null > "$dumpf"
+        timeout 15 tcpdump -A -r "$read_target" 2>/dev/null > "$dumpf"
+        rm -f "$snapf"
         # BUG FOUND AND FIXED (caught reviewing this same session's own
         # timeout-wrapping fix, before it ever shipped): wrapping a command
         # in `timeout` bounds the worst-case DELAY, but a command that
@@ -747,8 +1023,21 @@ run_packet_feed() {
             return 0
         fi
 
+        # BUG FOUND AND FIXED (same check-then-act race as run_creds_
+        # watcher's own fix above, applied here too - this loop's 2s
+        # cadence and 10s timeout give an even tighter but still real
+        # window: up to ~5.2MB of new growth at this session's measured
+        # ~0.52MB/s rate could be picked up mid-read on top of the checked
+        # cur_size, since `tcpdump -r` reads the live file directly rather
+        # than a point-in-time snapshot). Same fix: bound what tcpdump can
+        # ever see to exactly the size already confirmed safe.
+        local snapf="/tmp/pager-sniff-feed-snap.$$" read_target
+        head -c "$cur_size" "$file" > "$snapf" 2>/dev/null
+        # Same defensive fallback as run_creds_watcher's own snapshot fix.
+        if [ -s "$snapf" ]; then read_target="$snapf"; else read_target="$file"; fi
         local lines count new lines_rc
-        lines=$(timeout 10 tcpdump -nn -r "$file" 2>/dev/null); lines_rc=$?
+        lines=$(timeout 10 tcpdump -nn -r "$read_target" 2>/dev/null); lines_rc=$?
+        rm -f "$snapf"
         # BUG FOUND AND FIXED (same class as run_creds_watcher's own fix,
         # applied here too): timeout's exit code is captured immediately
         # after the direct (non-piped) command substitution above, so 124
@@ -977,13 +1266,41 @@ start_bridge_dhcp() {
 # lease (-R) is a courtesy to the DHCP server (frees the lease sooner
 # instead of making it wait out the full lease time for an inactive
 # client) - harmless no-op if nothing was ever running.
+#
+# BUG FOUND AND FIXED (CRITICAL, PID-reuse gap that tonight's other
+# WATCHDOG_PIDFILE/PIDFILE.watcher/PIDFILE.feed fixes in this file never
+# got carried over to): this used a bare `kill -USR2 "$_pid"` / `kill
+# "$_pid"` on whatever number BRIDGE_DHCP_PIDFILE currently contains, with
+# no confirmation that PID is still actually the udhcpc process this file
+# wrote it for - the exact same class of bug pid_running() was introduced
+# to close for every OTHER pidfile-kill site in this script (is_running()'s
+# "tcpdump" check, and all three WATCHDOG_PIDFILE sites' "sniff.sh" check).
+# BRIDGE_DHCP_PIDFILE is genuinely exposed to this: udhcpc here runs as a
+# long-lived background daemon for up to MAX_BRIDGE_SECS (an hour by
+# default) on a device this file's own comments repeatedly describe as
+# memory/CPU-constrained - if it dies out-of-band (OOM kill, crash) before
+# stop_bridge_dhcp() runs, and the PID counter later reuses that exact
+# number for an unrelated process (sshd, a cron job, anything) in the
+# meantime, this would signal that unrelated process instead. Verified
+# standalone: pid_running() against a live PID that is NOT udhcpc (pattern
+# "udhcpc" not present in its /proc/PID/cmdline) correctly returns 1/false
+# and skips the kill, where the old unconditional code would have signaled
+# it regardless - confirmed against both a non-udhcpc live PID (negative
+# control) and a process with argv[0] set to "udhcpc" (positive control,
+# via `exec -a udhcpc`), both matching pid_running()'s documented
+# semantics. Routed through the same pid_running() primitive as every
+# other pidfile-kill site in this file, with "udhcpc" as the NAME_PATTERN
+# (udhcpc is a real, separate process here, not a subshell of this script,
+# so it needs its own pattern rather than "sniff.sh").
 stop_bridge_dhcp() {
     if [ -f "$BRIDGE_DHCP_PIDFILE" ]; then
         local _pid
         _pid=$(cat "$BRIDGE_DHCP_PIDFILE" 2>/dev/null)
-        [ -n "$_pid" ] && kill -USR2 "$_pid" 2>/dev/null
-        sleep 0.2
-        [ -n "$_pid" ] && kill "$_pid" 2>/dev/null
+        if pid_running "$BRIDGE_DHCP_PIDFILE" "udhcpc"; then
+            kill -USR2 "$_pid" 2>/dev/null
+            sleep 0.2
+            kill "$_pid" 2>/dev/null
+        fi
         rm -f "$BRIDGE_DHCP_PIDFILE"
     fi
 }
@@ -1062,8 +1379,24 @@ start_lan_watchdog() {
         pid_running "$WATCHDOG_PIDFILE" "sniff.sh" && kill "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null
         rm -f "$WATCHDOG_PIDFILE"
     fi
+    # BUG FOUND AND FIXED (edge case, verified with a standalone test before
+    # applying here): the `|| echo 0` fallback below meant a `date +%s`
+    # failure at exactly this moment (the ONE time it's read to compute the
+    # deadline baseline) produced _start_ts="0" - which the case statement
+    # further down treats as a perfectly valid, real timestamp (epoch 0),
+    # not as "unknown"/"disabled". Verified: with MAX_BRIDGE_SECS=3600 that
+    # computes _deadline=3600 - a tiny number compared to any REAL `$(date
+    # +%s)` value (currently ~1.7 billion) - so the very next per-cycle
+    # `$_now -ge $_deadline` check (using a real, successful `date` call,
+    # since only the ONE-TIME initial read need have failed) is true
+    # immediately, tearing down a brand-new, perfectly healthy bridge on its
+    # very first 5s tick. The case statement already has a correct, safe
+    # "disabled" path for this - `''` (empty) - matching how `_now`'s own
+    # per-cycle read is already handled (case '' -> 0, guarded by `_deadline
+    # -gt 0`). Dropping the fallback lets a genuine failure hit that
+    # existing safe path instead of colliding with a real epoch value.
     local _start_ts
-    _start_ts=$(date +%s 2>/dev/null || echo 0)
+    _start_ts=$(date +%s 2>/dev/null)
     echo "$_start_ts" > "$BRIDGE_STARTED_FILE" 2>/dev/null
     (
         # PERFORMANCE FIX: the MAX_BRIDGE_SECS deadline used to be
@@ -1151,18 +1484,78 @@ start_lan_watchdog() {
             # own 3-try loop and --bridge's own existence-check retry)
             # avoids a false-positive teardown from nothing worse than a
             # single transient `ip link` hiccup.
-            _member_missing=0
-            if ! ip_link show "$BR_IFACE1" >/dev/null 2>&1 || ! ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
+            # BUG FOUND AND FIXED (CRITICAL, re-auditing tonight's own fix
+            # above - confirmed with a standalone repro before applying):
+            # the member-presence check used `ip_link show IFACE` (i.e.
+            # `timeout $IP_LINK_TIMEOUT ip link show IFACE`, see ip_link()
+            # in common.sh) to test whether BR_IFACE1/BR_IFACE2 still exist.
+            # But that talks to the kernel over netlink - the EXACT call
+            # class this very file's OWN first fix (top of this file)
+            # documents as having wedged indefinitely on this device before
+            # its timeout guard existed. A wedged/congested (not literally
+            # infinite - anything that reliably eats the full
+            # IP_LINK_TIMEOUT per call) netlink socket makes `ip_link show`
+            # return nonzero for an interface that never actually went
+            # anywhere - indistinguishable, at this check, from a genuinely
+            # unplugged adapter. Since the retry loop only re-ran the SAME
+            # netlink-based check 2 more times 1s apart, a SUSTAINED wedge
+            # (not a one-off blip) fails every retry too, so this would
+            # tear down a perfectly healthy, still-attached bridge - the
+            # "watchdog fights a legitimately active bridge" failure class
+            # canonicalize_lan_topology's own header (common.sh) already
+            # names as the reason a second hand-written copy of this kind
+            # of check is dangerous to get wrong. Verified standalone (fake
+            # `ip` binary that just hangs, real interfaces present in a
+            # fake sysfs tree the whole time): the old ip_link-based check
+            # took 23s and still concluded "_member_missing=1" - a false
+            # positive - while a sysfs-based check reported both present
+            # correctly in 0s. Every OTHER existence check already in this
+            # file (detect_usb_c, list_wired_ifaces, detect_usb_a_iface)
+            # deliberately avoids `ip link` for exactly this reason and
+            # reads /sys/class/net/ directly instead - a plain stat with no
+            # netlink involvement, so it can never falsely report "gone"
+            # from netlink congestion alone, and it's actually the more
+            # authoritative signal for this exact question anyway (a real
+            # USB detach unregisters the netdev, which is exactly what
+            # sysfs reflects immediately - see the comment block above this
+            # one). Switched to that same primitive here too.
+            #
+            # BUG FOUND AND FIXED (same pass, MEDIUM - the old check could
+            # also never identify WHICH interface vanished for the log line
+            # below: `! ip_link show A || ! ip_link show B` short-circuits
+            # on A, so whenever BR_IFACE1 was the one missing, BR_IFACE2's
+            # own status was never even queried - both the log message and
+            # this code's own internal state stayed ambiguous about whether
+            # one or both members were actually gone). Checking both
+            # unconditionally (no `||`/`&&` short-circuiting) every retry
+            # fixes this too - $_missing_names below now names exactly
+            # which interface(s) were confirmed gone.
+            _br1_present=0; _br2_present=0
+            [ -e "/sys/class/net/$BR_IFACE1" ] && _br1_present=1
+            [ -e "/sys/class/net/$BR_IFACE2" ] && _br2_present=1
+            if [ "$_br1_present" = "0" ] || [ "$_br2_present" = "0" ]; then
                 _retry=0
                 while [ "$_retry" -lt 2 ]; do
                     sleep 1
                     _retry=$((_retry + 1))
-                    if ip_link show "$BR_IFACE1" >/dev/null 2>&1 && ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
-                        break
-                    fi
+                    _br1_present=0; _br2_present=0
+                    [ -e "/sys/class/net/$BR_IFACE1" ] && _br1_present=1
+                    [ -e "/sys/class/net/$BR_IFACE2" ] && _br2_present=1
+                    [ "$_br1_present" = "1" ] && [ "$_br2_present" = "1" ] && break
                 done
-                if ! ip_link show "$BR_IFACE1" >/dev/null 2>&1 || ! ip_link show "$BR_IFACE2" >/dev/null 2>&1; then
-                    _member_missing=1
+            fi
+            _member_missing=0
+            _missing_names=""
+            if [ "$_br1_present" = "0" ]; then
+                _member_missing=1
+                _missing_names="$BR_IFACE1"
+            fi
+            if [ "$_br2_present" = "0" ]; then
+                _member_missing=1
+                if [ -n "$_missing_names" ]; then
+                    _missing_names="$_missing_names, $BR_IFACE2"
+                else
+                    _missing_names="$BR_IFACE2"
                 fi
             fi
             if [ "$_member_missing" = "1" ]; then
@@ -1171,8 +1564,8 @@ start_lan_watchdog() {
                 stop_bridge_dhcp
                 ip_link set "$BRIDGE_NAME" down 2>/dev/null
                 ip_link delete "$BRIDGE_NAME" type bridge 2>/dev/null
-                topology_log "watchdog: a bridge member ($BR_IFACE1/$BR_IFACE2) has disappeared (USB adapter physically detached?) - tore down $BRIDGE_NAME and restored eth0 to br-lan"
-                echo "[sniff.sh watchdog] A bridge member interface ($BR_IFACE1 or $BR_IFACE2) has disappeared - likely a USB adapter physically detached. Bridge torn down, eth0 restored to br-lan automatically (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
+                topology_log "watchdog: bridge member(s) missing: $_missing_names (of $BR_IFACE1/$BR_IFACE2) - tore down $BRIDGE_NAME and restored eth0 to br-lan"
+                echo "[sniff.sh watchdog] Bridge member interface(s) $_missing_names disappeared - likely a USB adapter physically detached. Bridge torn down, eth0 restored to br-lan automatically (second safety net, independent of any EXIT trap)." >>/tmp/pager-sniff.log 2>/dev/null
                 rm -f "$BRIDGE_STARTED_FILE" "$WATCHDOG_PIDFILE"
                 exit 0
             fi
@@ -1517,7 +1910,37 @@ say "Output:    $OUTPUT"
 # run_capture - used for FOREGROUND captures only (the script keeps
 # running after this returns, to print the "Done"/summary below - see
 # run_capture_bg for why background can't share this function unchanged).
+#
+# BUG FOUND AND FIXED (found via code review, verified with a standalone
+# `bash -c` repro before applying): $FILTER is deliberately left UNQUOTED
+# below - tcpdump joins multiple trailing plain arguments into one filter
+# expression, so word-splitting an unquoted `--filter "port 80 or port
+# 443"` into separate argv words is what lets a multi-word BPF expression
+# work at all; quoting it would pass the whole thing as one single (and to
+# tcpdump, invalid) argument instead. But bash's unquoted expansion doesn't
+# just word-split - it ALSO pathname-expands (globs) each resulting word,
+# and common BPF idioms use bracket syntax that IS valid glob syntax too
+# (e.g. `tcp[13] & 0x02 != 0` and `ip[9] == 6`, both standard, commonly-
+# taught ways to match TCP flags/protocol numbers by byte offset).
+# Confirmed standalone: with a file literally named "tcp1" sitting in the
+# current directory, `FILTER="tcp[13] and port 80"; set -- $FILTER; echo
+# "$1"` prints "tcp1", not the literal "tcp[13]" the operator typed - the
+# filter silently gets corrupted into whatever matched, with no error, no
+# warning, and a capture that ran with the WRONG filter the whole time.
+# This is a realistic, not contrived, trigger: sniff.sh doesn't cd anywhere
+# special first, so its current directory is whatever the caller's shell
+# (or the payload runner) happened to be in - a `/root` with ordinary
+# single/double-character filenames left over from other tools is enough.
+# `set -f` (noglob) disables ONLY the pathname-expansion half while leaving
+# word-splitting fully intact, so a multi-word filter still becomes
+# multiple argv words exactly as intended, but a bracket/glob-looking token
+# in it is now always passed through byte-for-byte. Scoped to just this
+# function (restored before returning) rather than set globally, since
+# lib/common.sh's own detect_usb_a_iface() (called via check_adapters()
+# earlier in this script) relies on real globbing over /sys/class/net/*.
 run_capture() {
+    set -f
+    local _rc
     if [ "$LIVE" = "1" ]; then
         if [ -n "$DURATION" ]; then
             timeout "$DURATION" tcpdump "${TD_ARGS[@]}" $FILTER 2>&1
@@ -1531,6 +1954,9 @@ run_capture() {
             tcpdump "${TD_ARGS[@]}" $FILTER >/dev/null 2>&1
         fi
     fi
+    _rc=$?
+    set +f
+    return "$_rc"
 }
 
 # run_capture_bg - BUG FOUND AND FIXED (live-verified): --background used
@@ -1555,6 +1981,12 @@ run_capture() {
 # process, which is true for this disposable background subshell but NOT
 # true for the foreground path (which prints "Done"/the summary after).
 run_capture_bg() {
+    # Same unquoted-$FILTER glob-expansion risk as run_capture() above, same
+    # fix - see its own comment for the standalone repro. No matching
+    # `set +f` needed here: every branch below ends in `exec`, which
+    # replaces this subshell's process image outright, so there's no
+    # "after" for a shell option to leak into.
+    set -f
     if [ "$LIVE" = "1" ]; then
         if [ -n "$DURATION" ]; then
             exec timeout "$DURATION" tcpdump "${TD_ARGS[@]}" $FILTER 2>&1
